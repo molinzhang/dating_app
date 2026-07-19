@@ -12,7 +12,7 @@
 项目提交了 `pnpm-lock.yaml`，请优先使用 pnpm，避免生成第二份锁文件。
 
 ```bash
-cd "Website Creation"
+cd website
 corepack enable
 pnpm install --frozen-lockfile
 pnpm dev
