@@ -3,3 +3,24 @@ __pycache__/
 *.pyc
 .env
 *.db
+
+# Node / Vite local dependencies and generated output
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+.cache/
+coverage/
+
+# Local environment overrides (keep example files if added later)
+.env.*
+!.env.example
+!.env.*.example
+
+# Editor and operating-system files
+.idea/
+.vscode/
+*.local
+*.log
+.DS_Store
+Thumbs.db
