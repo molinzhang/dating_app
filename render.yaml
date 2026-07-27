@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: common-ground-api
+    runtime: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Render injects $PORT; binding to it (and 0.0.0.0) is required.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false        # set in the Render dashboard, never commit it
+      - key: CORS_ORIGINS
+        sync: false        # the deployed frontend URL, e.g. https://xxx.vercel.app
+      - key: PYTHON_VERSION
+        value: "3.11"

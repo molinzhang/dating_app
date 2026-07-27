@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Optional, Literal
 
@@ -19,13 +20,29 @@ PHOTOS_DIR.mkdir(exist_ok=True)
 db.init_db()
 
 app = FastAPI(title="Common Ground API")
+
+# Browsers block credentialed cross-origin requests to "*", and once this is
+# deployed the frontend sits on a different domain than the API. Set
+# CORS_ORIGINS to a comma-separated list of frontend URLs in production;
+# defaults to the local Vite dev server.
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.mount("/api/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
+
+
+@app.get("/api/health")
+def health():
+    """Liveness probe for the hosting platform."""
+    return {"ok": True}
 
 
 # ============================================================ serializers ==
