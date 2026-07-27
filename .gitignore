@@ -24,3 +24,10 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+
+# Runtime data: user-uploaded profile photos
+backend/photos/
+
+# Superseded Figma export — lives on as website/
+Website Creation*/
+Website Creation*.zip

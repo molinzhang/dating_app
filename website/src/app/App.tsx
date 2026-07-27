@@ -7,6 +7,7 @@ import {
   Mail, GraduationCap, Users
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
+import { api, ApiError, getToken, setToken, resolvePhotoUrl } from "../lib/api";
 
 // ============================================================
 // TYPES
@@ -17,10 +18,8 @@ type Route =
   | "/questionnaire" | "/questionnaire/complete"
   | "/results" | "/results/archive" | "/matches/current";
 
-type DashboardState = "A" | "B" | "C" | "D" | "E";
-
 interface AppUser {
-  id: string; displayName: string; email: string;
+  id: string; displayName: string; email: string; gender: "男" | "女";
   wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string;
   status: "active" | "inactive";
   questionnaireStatus: "not_started" | "in_progress" | "completed";
@@ -102,36 +101,12 @@ const VALUE_DIMENSIONS = [
   { name:"直接表达 ↔ 关系照顾", leftLabel:"直接表达", rightLabel:"关系照顾", questionIds:[20,21,22], color:"#EC4899" },
 ];
 
-const DEMO_ANSWERS: Record<number, number> = {
+// Fallback spectrum used only by the landing-page illustration, which renders
+// before anyone is logged in and has no real answers to draw.
+const SAMPLE_ANSWERS: Record<number, number> = {
   1:5,2:3,3:5,4:4,5:3,6:3,7:6,8:4,9:3,10:4,
   11:4,12:5,13:4,14:5,15:4,16:3,17:4,18:5,
   19:4,20:6,21:5,22:4,23:3,24:4
-};
-
-const MOCK_MATCH: WeeklyMatch = {
-  id:"match-001",
-  matchedUser:{ displayName:"晓晨", email:"xiaochen@example.com", wechat:"xiaochen_wc", instagram:"@xiaochen_life", photoUrl:"/example_boy.webp" },
-  compatibilitySummary:"你们在5个核心维度上高度接近",
-  dimensionComparisons:[
-    { dimension:"探索开放 ↔ 稳定守序", userScore:5, matchScore:5, category:"close" },
-    { dimension:"独立空间 ↔ 社交联结", userScore:3, matchScore:4, category:"close" },
-    { dimension:"成就驱动 ↔ 生活从容", userScore:6, matchScore:5, category:"close" },
-    { dimension:"储蓄保障 ↔ 当下体验", userScore:3, matchScore:5, category:"complementary" },
-    { dimension:"竞争贡献 ↔ 平等合作", userScore:4, matchScore:4, category:"close" },
-    { dimension:"原则传统 ↔ 情境更新", userScore:5, matchScore:3, category:"discuss" },
-    { dimension:"直接表达 ↔ 关系照顾", userScore:6, matchScore:4, category:"complementary" },
-  ],
-  recommendationDate:"2026-07-07",
-  nextRefreshDate:"2026-07-14",
-  responseStatus:"unseen",
-};
-
-const ARCHIVED_RESULT: QuestionnaireResponse = {
-  id:"q-archived-001", version:1,
-  answers:{ 1:3,2:4,3:3,4:5,5:4,6:4,7:5,8:3,9:4,10:3,11:5,12:4,13:3,14:4,15:5,16:4,17:3,18:4,19:5,20:4,21:3,22:5,23:4,24:3 },
-  importantQuestionIds:[1,5,7,19,23],
-  startedAt:"2025-11-15T09:00:00Z", completedAt:"2025-11-15T09:32:00Z",
-  status:"archived", currentSection:5,
 };
 
 // ============================================================
@@ -144,47 +119,23 @@ interface AppCtx {
   questionnaire: QuestionnaireResponse | null;
   archivedQuestionnaires: QuestionnaireResponse[];
   weeklyMatch: WeeklyMatch | null;
-  demoState: DashboardState;
+  booting: boolean;
   navigate: (r: Route) => void;
-  login: (email: string, pw: string) => boolean;
-  register: (data: { email: string; password: string; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => void;
+  login: (email: string, pw: string) => Promise<boolean>;
+  register: (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => Promise<string | null>;
   logout: () => void;
-  updateUser: (u: Partial<AppUser>) => void;
+  updateUser: (u: Partial<AppUser>) => Promise<void>;
+  uploadPhoto: (file: File) => Promise<void>;
   saveAnswers: (answers: Record<number, number>, section: number) => void;
-  submitQuestionnaire: (importantIds: number[]) => void;
-  retakeQuestionnaire: () => void;
-  setDemoState: (s: DashboardState) => void;
+  submitQuestionnaire: (importantIds: number[]) => Promise<void>;
+  retakeQuestionnaire: () => Promise<void>;
+  refreshMatch: () => Promise<void>;
   updateMatchResponse: (status: WeeklyMatch["responseStatus"]) => void;
+  dislikeMatch: () => Promise<void>;
 }
 
 const Ctx = createContext<AppCtx>(null!);
 const useApp = () => useContext(Ctx);
-
-function buildState(ds: DashboardState): { user: AppUser; questionnaire: QuestionnaireResponse | null; archived: QuestionnaireResponse[]; match: WeeklyMatch | null } {
-  const baseUser: AppUser = {
-    id:"user-001", displayName:"林晴", email:"linqing@example.com",
-    wechat:"linqing_wc", instagram:"@linqing", status:"active",
-    questionnaireStatus:"not_started", createdAt:"2026-06-01T10:00:00Z",
-    photoUrl:"/example_girl.webp", alumniVerificationStatus:"unverified"
-  };
-  const completedQ: QuestionnaireResponse = {
-    id:"q-001", version:2, answers:DEMO_ANSWERS, importantQuestionIds:[1,5,7,19,23],
-    startedAt:"2026-07-01T09:00:00Z", completedAt:"2026-07-01T09:28:00Z",
-    status:"current", currentSection:5,
-  };
-  const draftQ: QuestionnaireResponse = {
-    id:"q-draft", version:2, answers:{ 1:5,2:3,3:5,4:4,5:3,6:3,7:6,8:4,9:3,10:4,11:4,12:5 },
-    importantQuestionIds:[], startedAt:"2026-07-10T14:00:00Z",
-    status:"draft", currentSection:2,
-  };
-
-  if (ds === "A") return { user:{...baseUser,questionnaireStatus:"not_started"}, questionnaire:null, archived:[], match:null };
-  if (ds === "B") return { user:{...baseUser,questionnaireStatus:"in_progress"}, questionnaire:draftQ, archived:[], match:null };
-  if (ds === "C") return { user:{...baseUser,questionnaireStatus:"completed",status:"active",alumniVerificationStatus:"verified",alumniVerificationMethod:"email"}, questionnaire:completedQ, archived:[ARCHIVED_RESULT], match:MOCK_MATCH };
-  if (ds === "D") return { user:{...baseUser,questionnaireStatus:"completed",status:"active"}, questionnaire:completedQ, archived:[ARCHIVED_RESULT], match:null };
-  // E
-  return { user:{...baseUser,questionnaireStatus:"completed",status:"inactive"}, questionnaire:completedQ, archived:[ARCHIVED_RESULT], match:null };
-}
 
 function AppProvider({ children }: { children: React.ReactNode }) {
   const [route, setRoute] = useState<Route>("/");
@@ -192,33 +143,39 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   const [questionnaire, setQuestionnaire] = useState<QuestionnaireResponse | null>(null);
   const [archivedQuestionnaires, setArchived] = useState<QuestionnaireResponse[]>([]);
   const [weeklyMatch, setWeeklyMatch] = useState<WeeklyMatch | null>(null);
-  const [demoState, setDemoStateVal] = useState<DashboardState>("A");
+  const [booting, setBooting] = useState(true);
 
-  // Load from localStorage on mount
-  useEffect(() => {
+  const applyBootstrap = useCallback((payload: any) => {
+    // alumniVerificationStatus/Method are a frontend-only demo concept with
+    // no backend field — carry them over so a refetch doesn't reset them.
+    setUser(prev => ({
+      ...payload.user,
+      alumniVerificationStatus: prev?.alumniVerificationStatus ?? payload.user.alumniVerificationStatus ?? "unverified",
+      alumniVerificationMethod: prev?.alumniVerificationMethod ?? payload.user.alumniVerificationMethod,
+    }));
+    setQuestionnaire(payload.questionnaire);
+    setArchived(payload.archivedQuestionnaires ?? []);
+    setWeeklyMatch(payload.weeklyMatch ?? null);
+  }, []);
+
+  const clearSession = useCallback(() => {
+    setToken(null);
+    setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null);
+  }, []);
+
+  const refreshMe = useCallback(async () => {
     try {
-      const saved = localStorage.getItem("cg_state");
-      if (saved) {
-        const s = JSON.parse(saved);
-        if (s.user) {
-          const isExampleUser = s.user.id === "user-001" || s.user.email === "linqing@example.com";
-          const hasPersistentPhoto = s.user.photoUrl && !String(s.user.photoUrl).startsWith("blob:");
-          setUser(isExampleUser && !hasPersistentPhoto ? { ...s.user, photoUrl:"/example_girl.webp" } : s.user);
-        }
-        if (s.questionnaire) setQuestionnaire(s.questionnaire);
-        if (s.archived) setArchived(s.archived);
-        if (s.weeklyMatch) setWeeklyMatch({
-          ...s.weeklyMatch,
-          matchedUser:{ ...s.weeklyMatch.matchedUser, photoUrl:s.weeklyMatch.matchedUser?.photoUrl || "/example_boy.webp" }
-        });
-        if (s.demoState) setDemoStateVal(s.demoState);
-      }
-    } catch {}
-  }, []);
+      applyBootstrap(await api.me());
+    } catch {
+      clearSession();
+    }
+  }, [applyBootstrap, clearSession]);
 
-  const persist = useCallback((u: AppUser | null, q: QuestionnaireResponse | null, arc: QuestionnaireResponse[], m: WeeklyMatch | null, ds: DashboardState) => {
-    localStorage.setItem("cg_state", JSON.stringify({ user:u, questionnaire:q, archived:arc, weeklyMatch:m, demoState:ds }));
-  }, []);
+  // Restore session from a stored token on first load.
+  useEffect(() => {
+    if (!getToken()) { setBooting(false); return; }
+    refreshMe().finally(() => setBooting(false));
+  }, [refreshMe]);
 
   const navigate = useCallback((r: Route) => {
     const protected_routes: Route[] = ["/dashboard","/questionnaire","/questionnaire/complete","/results","/results/archive","/matches/current"];
@@ -227,104 +184,121 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     window.scrollTo(0,0);
   }, [user]);
 
-  const login = useCallback((email: string, _pw: string): boolean => {
-    // Demo: accept any credentials
-    const u: AppUser = {
-      id:"user-001", displayName:"林晴", email, wechat:"linqing_wc",
-      instagram:"@linqing", status:"active", questionnaireStatus:"not_started",
-      createdAt:"2026-06-01T10:00:00Z", photoUrl:"/example_girl.webp",
-      alumniVerificationStatus:"unverified"
-    };
-    setUser(u); setRoute("/dashboard");
-    persist(u, questionnaire, archivedQuestionnaires, weeklyMatch, demoState);
-    return true;
-  }, [questionnaire, archivedQuestionnaires, weeklyMatch, demoState, persist]);
+  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+    try {
+      const payload = await api.login({ email, password });
+      setToken(payload.token);
+      applyBootstrap(payload);
+      setRoute("/dashboard");
+      return true;
+    } catch {
+      return false;
+    }
+  }, [applyBootstrap]);
 
-  const register = useCallback((data: { email: string; password: string; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => {
-    const namePart = data.email.split("@")[0];
-    const u: AppUser = {
-      id:"user-"+Date.now(), displayName: namePart, email:data.email,
-      wechat:data.wechat, instagram:data.instagram, xiaohongshu:data.xiaohongshu, linkedin:data.linkedin,
-      status:"active", questionnaireStatus:"not_started",
-      createdAt:new Date().toISOString(), alumniVerificationStatus:"unverified"
-    };
-    setUser(u); setRoute("/dashboard");
-    persist(u, null, [], null, demoState);
-  }, [demoState, persist]);
+  const register = useCallback(async (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }): Promise<string | null> => {
+    try {
+      const payload = await api.register(data);
+      setToken(payload.token);
+      applyBootstrap(payload);
+      setRoute("/dashboard");
+      return null;
+    } catch (e) {
+      return e instanceof ApiError ? e.message : "注册失败，请稍后再试";
+    }
+  }, [applyBootstrap]);
 
   const logout = useCallback(() => {
-    setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null);
-    localStorage.removeItem("cg_state");
+    api.logout().catch(() => {});
+    clearSession();
     setRoute("/");
+  }, [clearSession]);
+
+  const updateUser = useCallback(async (updates: Partial<AppUser>) => {
+    const backendFields: { status?: string; bio?: string; matchPreference?: string } = {};
+    if (updates.status !== undefined) backendFields.status = updates.status;
+    if (updates.bio !== undefined) backendFields.bio = updates.bio;
+    if (updates.matchPreference !== undefined) backendFields.matchPreference = updates.matchPreference;
+
+    if (Object.keys(backendFields).length > 0) {
+      try {
+        await api.updateMe(backendFields);
+      } catch {
+        toast.error("保存失败，请重试");
+        return;
+      }
+      await refreshMe();
+      return;
+    }
+    // Fields with no backend counterpart yet (e.g. alumni verification demo) stay local-only.
+    setUser(prev => prev ? { ...prev, ...updates } : prev);
+  }, [refreshMe]);
+
+  const uploadPhoto = useCallback(async (file: File) => {
+    try {
+      const updated = await api.uploadPhoto(file);
+      setUser(prev => prev ? { ...prev, ...updated } : prev);
+    } catch {
+      toast.error("上传失败，请重试");
+    }
   }, []);
 
-  const updateUser = useCallback((updates: Partial<AppUser>) => {
-    setUser(prev => {
-      if (!prev) return prev;
-      const next = {...prev, ...updates};
-      persist(next, questionnaire, archivedQuestionnaires, weeklyMatch, demoState);
-      return next;
-    });
-  }, [questionnaire, archivedQuestionnaires, weeklyMatch, demoState, persist]);
-
   const saveAnswers = useCallback((answers: Record<number, number>, section: number) => {
-    setQuestionnaire(prev => {
-      const next: QuestionnaireResponse = prev
-        ? { ...prev, answers:{ ...prev.answers, ...answers }, currentSection:section }
-        : { id:"q-"+Date.now(), version:1, answers, importantQuestionIds:[], startedAt:new Date().toISOString(), status:"draft", currentSection:section };
-      setUser(u => u ? { ...u, questionnaireStatus:"in_progress" } : u);
-      persist(user, next, archivedQuestionnaires, weeklyMatch, demoState);
-      return next;
-    });
-  }, [user, archivedQuestionnaires, weeklyMatch, demoState, persist]);
+    api.saveAnswers({ answers, currentSection: section })
+      .then((next: QuestionnaireResponse) => {
+        setQuestionnaire(next);
+        setUser(u => u ? { ...u, questionnaireStatus: "in_progress" } : u);
+      })
+      .catch(() => {});
+  }, []);
 
-  const submitQuestionnaire = useCallback((importantIds: number[]) => {
-    setQuestionnaire(prev => {
-      if (!prev) return prev;
-      const next: QuestionnaireResponse = { ...prev, importantQuestionIds:importantIds, completedAt:new Date().toISOString(), status:"current" };
-      const newUser = user ? { ...user, questionnaireStatus:"completed" as const } : user;
-      setUser(newUser);
-      const newMatch = { ...MOCK_MATCH, id:"match-"+Date.now() };
-      setWeeklyMatch(newMatch);
-      persist(newUser, next, archivedQuestionnaires, newMatch, demoState);
-      return next;
-    });
-    setRoute("/questionnaire/complete");
-  }, [user, archivedQuestionnaires, weeklyMatch, demoState, persist]);
+  const submitQuestionnaire = useCallback(async (importantIds: number[]) => {
+    try {
+      await api.submitQuestionnaire({ importantQuestionIds: importantIds });
+      await refreshMe();
+      setRoute("/questionnaire/complete");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "提交失败，请稍后再试");
+    }
+  }, [refreshMe]);
 
-  const retakeQuestionnaire = useCallback(() => {
-    setQuestionnaire(prev => {
-      if (prev && prev.status === "current") {
-        const archived = { ...prev, status:"archived" as const };
-        setArchived(a => [archived, ...a]);
-        persist(user, null, [archived, ...archivedQuestionnaires], weeklyMatch, demoState);
-      }
-      return null;
-    });
-    setUser(u => u ? {...u, questionnaireStatus:"not_started"} : u);
-    setRoute("/questionnaire");
-  }, [user, archivedQuestionnaires, weeklyMatch, demoState, persist]);
+  const retakeQuestionnaire = useCallback(async () => {
+    try {
+      await api.retakeQuestionnaire();
+      await refreshMe();
+      setRoute("/questionnaire");
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : "操作失败，请稍后再试");
+    }
+  }, [refreshMe]);
 
-  const setDemoState = useCallback((s: DashboardState) => {
-    const built = buildState(s);
-    setUser(built.user);
-    setQuestionnaire(built.questionnaire);
-    setArchived(built.archived);
-    setWeeklyMatch(built.match);
-    setDemoStateVal(s);
-    persist(built.user, built.questionnaire, built.archived, built.match, s);
-  }, [persist]);
+  const refreshMatch = useCallback(async () => {
+    try {
+      setWeeklyMatch(await api.matchCurrent());
+    } catch {}
+  }, []);
 
   const updateMatchResponse = useCallback((status: WeeklyMatch["responseStatus"]) => {
-    setWeeklyMatch(prev => prev ? {...prev, responseStatus:status} : prev);
+    api.matchResponse(status).then(setWeeklyMatch).catch(() => {
+      setWeeklyMatch(prev => prev ? {...prev, responseStatus:status} : prev);
+    });
+  }, []);
+
+  const dislikeMatch = useCallback(async () => {
+    try {
+      await api.matchDislike();
+      setWeeklyMatch(null);
+    } catch {
+      toast.error("操作失败，请重试");
+    }
   }, []);
 
   return (
     <Ctx.Provider value={{
-      route, user, questionnaire, archivedQuestionnaires, weeklyMatch, demoState,
-      navigate, login, register, logout, updateUser,
-      saveAnswers, submitQuestionnaire, retakeQuestionnaire,
-      setDemoState, updateMatchResponse,
+      route, user, questionnaire, archivedQuestionnaires, weeklyMatch, booting,
+      navigate, login, register, logout, updateUser, uploadPhoto,
+      saveAnswers, submitQuestionnaire, retakeQuestionnaire, refreshMatch,
+      updateMatchResponse, dislikeMatch,
     }}>
       {children}
     </Ctx.Provider>
@@ -589,7 +563,7 @@ function Header() {
                     onClick={() => setMenuOpen(v => !v)}
                     className="w-9 h-9 rounded-full bg-primary text-primary-foreground flex items-center justify-center font-medium text-sm hover:opacity-90 transition-opacity overflow-hidden"
                   >
-                    {user.photoUrl ? <img src={user.photoUrl} alt={user.displayName} className="w-full h-full object-cover"/> : user.displayName.slice(0,1)}
+                    {user.photoUrl ? <img src={resolvePhotoUrl(user.photoUrl)} alt={user.displayName} className="w-full h-full object-cover"/> : user.displayName.slice(0,1)}
                   </button>
                   {menuOpen && (
                     <div className="absolute right-0 top-full mt-2 w-44 bg-card rounded-xl border border-border shadow-lg py-1 z-50">
@@ -627,7 +601,7 @@ function Header() {
               <>
                 <div className="flex items-center gap-3 pb-3 border-b border-border mb-1">
                   <div className="w-10 h-10 rounded-full bg-primary text-primary-foreground flex items-center justify-center font-medium overflow-hidden">
-                    {user.photoUrl ? <img src={user.photoUrl} alt={user.displayName} className="w-full h-full object-cover"/> : user.displayName.slice(0,1)}
+                    {user.photoUrl ? <img src={resolvePhotoUrl(user.photoUrl)} alt={user.displayName} className="w-full h-full object-cover"/> : user.displayName.slice(0,1)}
                   </div>
                   <div>
                     <p className="font-medium">{user.displayName}</p>
@@ -727,7 +701,7 @@ function ValueSpectrumViz({ userAnswers, matchAnswers, size = 320 }: {
   const toPath = (pts: { x: number; y: number }[]) =>
     pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ") + " Z";
 
-  const ua = userAnswers || DEMO_ANSWERS;
+  const ua = userAnswers || SAMPLE_ANSWERS;
   const ma = matchAnswers || { 1:3,2:5,3:4,4:3,5:5,6:4,7:3,8:5,9:5,10:3,11:5,12:4,13:5,14:3,15:5,16:4,17:3,18:5,19:3,20:5,21:4,22:3,23:5,24:4 };
 
   return (
@@ -918,6 +892,7 @@ function RegisterPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [gender, setGender] = useState<"男" | "女" | "">("");
   const [wechat, setWechat] = useState("");
   const [instagram, setInstagram] = useState("");
   const [xiaohongshu, setXiaohongshu] = useState("");
@@ -925,6 +900,7 @@ function RegisterPage() {
   const [agreed, setAgreed] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showContacts, setShowContacts] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const pwStrength = password.length === 0 ? 0 : password.length < 6 ? 1 : password.length < 10 ? 2 : 3;
   const pwLabels = ["", "偏弱", "中等", "较强"];
@@ -935,14 +911,19 @@ function RegisterPage() {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) e.email = "请输入有效的邮箱地址";
     if (password.length < 8) e.password = "密码至少需要8位";
     if (password !== confirm) e.confirm = "两次密码不一致";
+    if (!gender) e.gender = "请选择性别";
     if (!agreed) e.agreed = "请同意服务条款";
     setErrors(e);
     return Object.keys(e).length === 0;
   };
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (validate()) register({ email, password, wechat, instagram, xiaohongshu, linkedin });
+    if (!validate()) return;
+    setSubmitting(true);
+    const errorMessage = await register({ email, password, gender: gender as "男" | "女", wechat, instagram, xiaohongshu, linkedin });
+    setSubmitting(false);
+    if (errorMessage) setErrors(prev => ({ ...prev, email: errorMessage }));
   };
 
   return (
@@ -964,6 +945,26 @@ function RegisterPage() {
             </div>
           )}
           <PasswordInput label="确认密码" value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="再次输入密码" error={errors.confirm} autoComplete="new-password"/>
+
+          <div>
+            <label className="text-sm font-medium text-foreground block mb-1.5">性别</label>
+            <div className="flex gap-3">
+              {(["男","女"] as const).map(g => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => setGender(g)}
+                  className={cn(
+                    "flex-1 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                    gender === g ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border hover:border-primary/50"
+                  )}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+            {errors.gender && <p className="text-destructive text-sm mt-1.5 flex items-center gap-1"><AlertTriangle size={14}/>{errors.gender}</p>}
+          </div>
 
           <div className="border-t border-border pt-5">
             <button type="button" onClick={() => setShowContacts(v => !v)} className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors w-full text-left">
@@ -993,7 +994,7 @@ function RegisterPage() {
             {errors.agreed && <p className="text-destructive text-sm mt-1 flex items-center gap-1"><AlertTriangle size={14}/>{errors.agreed}</p>}
           </div>
 
-          <Btn type="submit" className="w-full" size="lg">创建账号</Btn>
+          <Btn type="submit" className="w-full" size="lg" disabled={submitting}>{submitting ? "创建中…" : "创建账号"}</Btn>
           <p className="text-center text-sm text-muted-foreground">
             已有账号？<button type="button" onClick={() => navigate("/login")} className="text-primary font-medium hover:underline">登录</button>
           </p>
@@ -1005,15 +1006,18 @@ function RegisterPage() {
 
 function LoginPage() {
   const { navigate, login } = useApp();
-  const [email, setEmail] = useState("linqing@example.com");
-  const [password, setPassword] = useState("password123");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) { setError("请填写邮箱和密码"); return; }
-    const ok = login(email, password);
+    setSubmitting(true);
+    const ok = await login(email, password);
+    setSubmitting(false);
     if (!ok) setError("邮箱或密码不正确，请重试。");
   };
 
@@ -1039,12 +1043,11 @@ function LoginPage() {
             </label>
             <button type="button" className="text-sm text-primary hover:underline">忘记密码？</button>
           </div>
-          <Btn type="submit" className="w-full" size="lg">登录</Btn>
+          <Btn type="submit" className="w-full" size="lg" disabled={submitting}>{submitting ? "登录中…" : "登录"}</Btn>
           <p className="text-center text-sm text-muted-foreground">
             还没有账号？<button type="button" onClick={() => navigate("/register")} className="text-primary font-medium hover:underline">免费注册</button>
           </p>
         </form>
-        <p className="text-center text-xs text-muted-foreground mt-4">演示提示：任意邮箱+密码均可登录</p>
       </div>
     </div>
   );
@@ -1136,38 +1139,22 @@ function AlumniVerificationCard({ user, onUpdate }: { user: AppUser; onUpdate: (
   );
 }
 
-function ProfileCard({ user, onUpdate }: { user: AppUser; onUpdate: (u: Partial<AppUser>) => void }) {
+function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdate: (u: Partial<AppUser>) => void; onUploadPhoto: (file: File) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [bio, setBio] = useState(user.bio ?? "");
   const [pref, setPref] = useState(user.matchPreference ?? "");
-  const [photoUrl, setPhotoUrl] = useState(user.photoUrl ?? "");
+  const [uploading, setUploading] = useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
-  const handlePhoto = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!file.type.startsWith("image/")) { toast.error("请选择图片文件"); return; }
     if (file.size > 5 * 1024 * 1024) { toast.error("图片不能超过 5 MB"); return; }
-    const reader = new FileReader();
-    reader.onerror = () => toast.error("图片读取失败，请重试");
-    reader.onload = () => {
-      const image = new Image();
-      image.onerror = () => toast.error("无法处理这张图片");
-      image.onload = () => {
-        const maxSide = 900;
-        const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(image.width * scale);
-        canvas.height = Math.round(image.height * scale);
-        canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-        setPhotoUrl(dataUrl);
-        onUpdate({ photoUrl: dataUrl });
-        toast.success("照片已保存");
-      };
-      image.src = String(reader.result);
-    };
-    reader.readAsDataURL(file);
+    setUploading(true);
+    await onUploadPhoto(file);
+    setUploading(false);
+    toast.success("照片已保存");
   };
 
   const save = () => {
@@ -1182,7 +1169,7 @@ function ProfileCard({ user, onUpdate }: { user: AppUser; onUpdate: (u: Partial<
     setEditing(false);
   };
 
-  const currentPhoto = user.photoUrl ?? photoUrl;
+  const currentPhoto = resolvePhotoUrl(user.photoUrl);
 
   return (
     <div className="bg-card rounded-2xl border border-border p-6 mb-8">
@@ -1228,9 +1215,10 @@ function ProfileCard({ user, onUpdate }: { user: AppUser; onUpdate: (u: Partial<
           />
           <button
             onClick={() => fileRef.current?.click()}
-            className="text-xs text-primary hover:underline"
+            disabled={uploading}
+            className="text-xs text-primary hover:underline disabled:opacity-50"
           >
-            {currentPhoto ? "更换照片" : "上传照片"}
+            {uploading ? "上传中…" : currentPhoto ? "更换照片" : "上传照片"}
           </button>
           <p className="text-[10px] text-muted-foreground text-center leading-relaxed">仅在匹配成功<br/>后对推荐对象可见</p>
         </div>
@@ -1296,7 +1284,7 @@ function ProfileCard({ user, onUpdate }: { user: AppUser; onUpdate: (u: Partial<
 }
 
 function DashboardPage() {
-  const { user, questionnaire, weeklyMatch, navigate, updateUser, demoState, setDemoState } = useApp();
+  const { user, questionnaire, weeklyMatch, navigate, updateUser, uploadPhoto } = useApp();
   const [showPauseModal, setShowPauseModal] = useState(false);
 
   if (!user) return null;
@@ -1318,34 +1306,6 @@ function DashboardPage() {
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
-      {/* Demo switcher */}
-      <div className="mb-6 p-4 bg-card border border-border rounded-2xl">
-        <p className="text-xs text-muted-foreground mb-3 font-medium">🎨 设计预览模式 — 切换仪表盘状态</p>
-        <div className="flex flex-wrap gap-2">
-          {(["A","B","C","D","E"] as DashboardState[]).map(s => (
-            <button
-              key={s}
-              onClick={() => setDemoState(s)}
-              className={cn(
-                "px-4 py-1.5 rounded-full text-sm font-medium border transition-all",
-                demoState === s ? "bg-primary text-primary-foreground border-primary" : "bg-muted border-border hover:border-primary/50"
-              )}
-            >
-              {s === "A" && "A · 未填写"}
-              {s === "B" && "B · 进行中"}
-              {s === "C" && "C · 已完成+有推荐"}
-              {s === "D" && "D · 已完成+等待中"}
-              {s === "E" && "E · 已暂停"}
-            </button>
-          ))}
-        </div>
-        <div className="mt-4 pt-4 border-t border-border flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground mr-1">校友认证状态</span>
-          <button onClick={() => updateUser({ alumniVerificationStatus:"unverified", alumniVerificationMethod:undefined })} className={cn("px-3 py-1.5 rounded-full text-xs font-medium border transition-all", !isVerified ? "bg-[#D97706] text-white border-[#D97706]" : "bg-muted border-border")}>认证前</button>
-          <button onClick={() => updateUser({ alumniVerificationStatus:"verified", alumniVerificationMethod:"email" })} className={cn("px-3 py-1.5 rounded-full text-xs font-medium border transition-all", isVerified ? "bg-[#059669] text-white border-[#059669]" : "bg-muted border-border")}>认证后</button>
-        </div>
-      </div>
-
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
@@ -1359,7 +1319,7 @@ function DashboardPage() {
       <AlumniVerificationCard user={user} onUpdate={updateUser}/>
 
       {/* Profile card */}
-      <ProfileCard user={user} onUpdate={updateUser}/>
+      <ProfileCard user={user} onUpdate={updateUser} onUploadPhoto={uploadPhoto}/>
 
       {/* State A — not started */}
       {qs === "not_started" && (
@@ -1421,7 +1381,7 @@ function DashboardPage() {
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-3">
                     {weeklyMatch.matchedUser.photoUrl ? (
-                      <img src={weeklyMatch.matchedUser.photoUrl} alt={weeklyMatch.matchedUser.displayName} className="w-14 h-14 rounded-full object-cover"/>
+                      <img src={resolvePhotoUrl(weeklyMatch.matchedUser.photoUrl)} alt={weeklyMatch.matchedUser.displayName} className="w-14 h-14 rounded-full object-cover"/>
                     ) : (
                       <div className="w-14 h-14 rounded-full bg-gradient-to-br from-[#2B5CE6] to-[#7C3AED] flex items-center justify-center text-white font-bold text-xl">
                         {weeklyMatch.matchedUser.displayName.slice(0,1)}
@@ -2033,9 +1993,11 @@ function ArchivePage() {
 // ============================================================
 
 function MatchDetailPage() {
-  const { weeklyMatch, navigate, updateMatchResponse, user } = useApp();
+  const { weeklyMatch, navigate, updateMatchResponse, user, refreshMatch, dislikeMatch } = useApp();
   const [copied, setCopied] = useState(false);
   const [showReport, setShowReport] = useState(false);
+
+  useEffect(() => { refreshMatch(); }, [refreshMatch]);
 
   if (user && user.alumniVerificationStatus !== "verified") {
     return (
@@ -2111,7 +2073,7 @@ function MatchDetailPage() {
           <div>
             <div className="flex items-center gap-4 mb-4">
               {m.matchedUser.photoUrl ? (
-                <img src={m.matchedUser.photoUrl} alt={m.matchedUser.displayName} className="w-20 h-20 rounded-full object-cover shadow-lg"/>
+                <img src={resolvePhotoUrl(m.matchedUser.photoUrl)} alt={m.matchedUser.displayName} className="w-20 h-20 rounded-full object-cover shadow-lg"/>
               ) : (
                 <div className="w-20 h-20 rounded-full bg-gradient-to-br from-[#2B5CE6] to-[#7C3AED] flex items-center justify-center text-white font-bold text-3xl shadow-lg">
                   {m.matchedUser.displayName.slice(0,1)}
@@ -2255,7 +2217,7 @@ function MatchDetailPage() {
 
       <Modal open={showReport} onClose={() => setShowReport(false)} title="举报或屏蔽">
         <p className="text-muted-foreground text-sm leading-relaxed mb-6">
-          如果你对这位推荐有任何顾虑，可以举报不当内容或屏蔽此用户。我们会认真对待每一份反馈。
+          屏蔽后，你和这位用户将不会再被推荐给对方，此操作无法撤销。我们会认真对待每一份反馈。
         </p>
         <div className="space-y-2 mb-4">
           {["内容不当","感觉不真实","其他原因"].map(r => (
@@ -2264,8 +2226,8 @@ function MatchDetailPage() {
         </div>
         <div className="flex gap-3">
           <Btn variant="secondary" className="flex-1" onClick={() => setShowReport(false)}>取消</Btn>
-          <Btn variant="danger" className="flex-1" onClick={() => { setShowReport(false); toast("已收到你的反馈，谢谢。"); navigate("/dashboard"); }}>
-            提交反馈
+          <Btn variant="danger" className="flex-1" onClick={async () => { setShowReport(false); await dislikeMatch(); toast("已屏蔽，你们不会再被推荐给对方。"); navigate("/dashboard"); }}>
+            确认屏蔽
           </Btn>
         </div>
       </Modal>
@@ -2318,9 +2280,13 @@ export default function App() {
 }
 
 function AppRouterWrapper() {
-  const { route } = useApp();
+  const { route, booting } = useApp();
   const isQuestionnaire = route === "/questionnaire";
   const isCompletion = route === "/questionnaire/complete";
+
+  if (booting) {
+    return <div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">加载中…</div>;
+  }
 
   return (
     <>

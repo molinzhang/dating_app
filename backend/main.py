@@ -1,0 +1,390 @@
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Optional, Literal
+
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, EmailStr
+
+import auth
+import db
+import matching
+from questionnaire_config import ALL_QUESTION_IDS
+
+PHOTOS_DIR = Path(__file__).parent / "photos"
+PHOTOS_DIR.mkdir(exist_ok=True)
+
+db.init_db()
+
+app = FastAPI(title="Common Ground API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/api/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
+
+
+# ============================================================ serializers ==
+
+def serialize_user(user_row):
+    photo_url = f"/api/photos/{Path(user_row['photo_path']).name}" if user_row.get("photo_path") else None
+    return {
+        "id": str(user_row["id"]),
+        "displayName": user_row["display_name"],
+        "email": user_row["email"],
+        "gender": user_row["gender"],
+        "wechat": user_row.get("wechat"),
+        "instagram": user_row.get("instagram"),
+        "xiaohongshu": user_row.get("xiaohongshu"),
+        "linkedin": user_row.get("linkedin"),
+        "status": user_row["status"],
+        "questionnaireStatus": db.get_questionnaire_status(user_row["id"]),
+        "createdAt": user_row["created_at"],
+        "photoUrl": photo_url,
+        "bio": user_row.get("bio"),
+        "matchPreference": user_row.get("match_preference"),
+    }
+
+
+def serialize_questionnaire(q):
+    if q is None:
+        return None
+    return {
+        "id": str(q["id"]),
+        "version": q["version"],
+        "answers": q["answers"],
+        "importantQuestionIds": q["important_question_ids"],
+        "startedAt": q["started_at"],
+        "completedAt": q["completed_at"],
+        "status": q["status"],
+        "currentSection": q["current_section"],
+    }
+
+
+def serialize_weekly_match(match_row):
+    matched_user = db.get_user_by_id(match_row["matched_user_id"])
+    photo_url = f"/api/photos/{Path(matched_user['photo_path']).name}" if matched_user.get("photo_path") else None
+    return {
+        "id": str(match_row["id"]),
+        "matchedUser": {
+            "displayName": matched_user["display_name"],
+            "email": matched_user["email"],
+            "wechat": matched_user.get("wechat"),
+            "instagram": matched_user.get("instagram"),
+            "photoUrl": photo_url,
+        },
+        "compatibilitySummary": match_row["compatibility_summary"],
+        "dimensionComparisons": json.loads(match_row["dimension_comparisons"]),
+        "recommendationDate": match_row["recommendation_date"][:10],
+        "nextRefreshDate": match_row["next_refresh_date"][:10],
+        "responseStatus": match_row["response_status"],
+    }
+
+
+# ================================================================ auth dep ==
+
+def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="未登录")
+    token = authorization.removeprefix("Bearer ")
+    user_id = db.get_session_user_id(token)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+    user = db.get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return user
+
+
+# ===================================================== weekly match cycle ==
+
+def maybe_regenerate_weekly_matches():
+    """Lazy weekly refresh: when the current pairing cycle has expired (or a
+    newly-eligible user isn't part of it), re-run matching for the WHOLE
+    eligible pool at once and open a new cycle. The pool therefore converges
+    onto one shared weekly cadence rather than per-user 7-day timers.
+
+    Runs on nearly every request, so reads are batched — doing them per-user
+    turned a single login into ~29 round trips to a remote DB.
+    """
+    now = datetime.now(timezone.utc)
+    now_str = now.isoformat()
+
+    active_users = db.list_users_by_status("active")
+    responses = db.get_current_responses_for([u["id"] for u in active_users])
+    eligible = []
+    for u in active_users:
+        q = responses.get(u["id"])
+        if q:
+            eligible.append({
+                "id": u["id"],
+                "gender": u["gender"],
+                "answers": q["answers"],
+                "important_question_ids": q["important_question_ids"],
+            })
+    if len(eligible) < 2:
+        return
+
+    # Track cycles explicitly rather than inferring from weekly_matches rows:
+    # unmatched users never get a row, so "is anyone missing a match?" was
+    # always true and re-paired the entire pool on every single request.
+    eligible_ids = {u["id"] for u in eligible}
+    cycle = db.get_active_cycle(now_str)
+    if cycle is not None and eligible_ids <= db.get_cycle_participants(cycle["id"]):
+        return
+
+    assignments = matching.gale_shapley_matching(eligible, matching.build_exclusions(db.get_dislike_pairs()))
+    next_refresh_date = matching.next_refresh_from(now).isoformat()
+    answers_by_id = {u["id"]: u["answers"] for u in eligible}
+
+    rows = []
+    for a_id, b_id, _score in assignments:
+        comparisons_a, summary_a = matching.build_match_payload(answers_by_id[a_id], answers_by_id[b_id])
+        rows.append((a_id, b_id, summary_a, comparisons_a, now_str, next_refresh_date))
+        comparisons_b, summary_b = matching.build_match_payload(answers_by_id[b_id], answers_by_id[a_id])
+        rows.append((b_id, a_id, summary_b, comparisons_b, now_str, next_refresh_date))
+    db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
+
+
+def get_fresh_match_for(user_id):
+    if not db.get_current_response(user_id):
+        # No completed questionnaire right now (e.g. mid-retake) — any
+        # leftover weekly_matches row from before is stale, ignore it.
+        return None
+    maybe_regenerate_weekly_matches()
+    match_row = db.get_latest_match(user_id)
+    if match_row is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if datetime.fromisoformat(match_row["next_refresh_date"]) <= now:
+        return None
+    # A dislike recorded *after* this week's pairing was generated leaves the
+    # old row in place, so filter here too — not just at generation time.
+    if db.is_dislike_blocked(user_id, match_row["matched_user_id"]):
+        return None
+    # Same for someone pausing after being paired: we promise a paused user
+    # won't appear in anyone's recommendations, and this row exposes their
+    # contact details, so it has to stop being served.
+    partner = db.get_user_by_id(match_row["matched_user_id"])
+    if partner is None or partner["status"] != "active":
+        return None
+    return match_row
+
+
+# =================================================================== auth ==
+
+class ContactFields(BaseModel):
+    wechat: Optional[str] = None
+    instagram: Optional[str] = None
+    xiaohongshu: Optional[str] = None
+    linkedin: Optional[str] = None
+
+
+class RegisterBody(ContactFields):
+    email: EmailStr
+    password: str
+    gender: Literal["男", "女"]
+
+
+class LoginBody(BaseModel):
+    email: EmailStr
+    password: str
+
+
+def _bootstrap_payload(user_row):
+    user_id = user_row["id"]
+    questionnaire = db.get_current_response(user_id) or db.get_draft_response(user_id)
+    archived = db.get_archived_responses(user_id)
+    match_row = get_fresh_match_for(user_id) if user_row["status"] == "active" else None
+    return {
+        "user": serialize_user(user_row),
+        "questionnaire": serialize_questionnaire(questionnaire),
+        "archivedQuestionnaires": [serialize_questionnaire(q) for q in archived],
+        "weeklyMatch": serialize_weekly_match(match_row) if match_row else None,
+    }
+
+
+@app.post("/api/register")
+def register(body: RegisterBody):
+    if db.get_user_by_email(body.email):
+        raise HTTPException(status_code=400, detail="该邮箱已注册")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=400, detail="密码至少需要8位")
+    password_hash, salt = auth.hash_password(body.password)
+    display_name = body.email.split("@")[0]
+    user_id = db.create_user(body.email, password_hash, salt, display_name, body.gender, body.model_dump())
+    token = auth.new_session_token()
+    db.create_session(token, user_id)
+    payload = _bootstrap_payload(db.get_user_by_id(user_id))
+    return {"token": token, **payload}
+
+
+@app.post("/api/login")
+def login(body: LoginBody):
+    user = db.get_user_by_email(body.email)
+    if not user or not auth.verify_password(body.password, user["password_salt"], user["password_hash"]):
+        raise HTTPException(status_code=401, detail="邮箱或密码不正确")
+    token = auth.new_session_token()
+    db.create_session(token, user["id"])
+    payload = _bootstrap_payload(user)
+    return {"token": token, **payload}
+
+
+@app.post("/api/logout")
+def logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        db.delete_session(authorization.removeprefix("Bearer "))
+    return {"ok": True}
+
+
+@app.get("/api/me")
+def me(user=Depends(get_current_user)):
+    return _bootstrap_payload(user)
+
+
+# =================================================================== user ==
+
+class UpdateMeBody(BaseModel):
+    status: Optional[str] = None
+    bio: Optional[str] = None
+    matchPreference: Optional[str] = None
+
+
+@app.patch("/api/me")
+def update_me(body: UpdateMeBody, user=Depends(get_current_user)):
+    fields = {}
+    if body.status is not None:
+        if body.status not in ("active", "inactive"):
+            raise HTTPException(status_code=400, detail="status 必须是 active 或 inactive")
+        fields["status"] = body.status
+    if body.bio is not None:
+        fields["bio"] = body.bio
+    if body.matchPreference is not None:
+        fields["match_preference"] = body.matchPreference
+    db.update_user(user["id"], fields)
+    if fields.get("status") == "active":
+        maybe_regenerate_weekly_matches()
+    return serialize_user(db.get_user_by_id(user["id"]))
+
+
+@app.post("/api/me/photo")
+def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user)):
+    suffix = Path(file.filename).suffix or ".jpg"
+    dest = PHOTOS_DIR / f"{user['id']}{suffix}"
+    dest.write_bytes(file.file.read())
+    db.update_user(user["id"], {"photo_path": str(dest)})
+    return serialize_user(db.get_user_by_id(user["id"]))
+
+
+# ========================================================== questionnaire ==
+
+class SaveAnswersBody(BaseModel):
+    answers: dict[int, int]
+    currentSection: int
+
+
+class SubmitBody(BaseModel):
+    importantQuestionIds: list[int]
+
+
+def _start_new_draft(user_id):
+    """Archive any existing 'current' result and open a fresh draft. Matches
+    the reference frontend's retakeQuestionnaire(), which archives the old
+    result immediately when a retake starts — NOT deferred until the new one
+    is submitted (that's what the design brief's prose says, but the actual
+    shipped App.tsx code archives right away; we follow the code)."""
+    current = db.get_current_response(user_id)
+    if current:
+        db.archive_response(current["id"])
+    version = (current["version"] + 1) if current else 1
+    return db.create_draft(user_id, version)
+
+
+@app.put("/api/questionnaire")
+def save_answers(body: SaveAnswersBody, user=Depends(get_current_user)):
+    draft = db.get_draft_response(user["id"])
+    if draft is None:
+        draft = _start_new_draft(user["id"])
+    db.save_draft_answers(draft["id"], body.answers, body.currentSection)
+    return serialize_questionnaire(db.get_response_by_id(draft["id"]))
+
+
+@app.post("/api/questionnaire/submit")
+def submit_questionnaire(body: SubmitBody, user=Depends(get_current_user)):
+    draft = db.get_draft_response(user["id"])
+    if draft is None:
+        raise HTTPException(status_code=400, detail="没有进行中的问卷草稿")
+    unanswered = [qid for qid in ALL_QUESTION_IDS if qid not in draft["answers"]]
+    if unanswered:
+        raise HTTPException(status_code=400, detail=f"还有 {len(unanswered)} 题未完成")
+    if not (3 <= len(body.importantQuestionIds) <= 5):
+        raise HTTPException(status_code=400, detail="请选择 3-5 个最重要的维度")
+
+    db.submit_response(draft["id"], body.importantQuestionIds)
+    maybe_regenerate_weekly_matches()
+    return serialize_questionnaire(db.get_response_by_id(draft["id"]))
+
+
+@app.post("/api/questionnaire/retake")
+def retake_questionnaire(user=Depends(get_current_user)):
+    existing_draft = db.get_draft_response(user["id"])
+    if existing_draft:
+        return serialize_questionnaire(existing_draft)
+    draft = _start_new_draft(user["id"])
+    return serialize_questionnaire(draft)
+
+
+@app.get("/api/questionnaire/archive")
+def questionnaire_archive(user=Depends(get_current_user)):
+    return [serialize_questionnaire(q) for q in db.get_archived_responses(user["id"])]
+
+
+# =================================================================== match ==
+
+class MatchResponseBody(BaseModel):
+    status: str
+
+
+@app.get("/api/match/current")
+def match_current(user=Depends(get_current_user)):
+    if user["status"] != "active":
+        return None
+    match_row = get_fresh_match_for(user["id"])
+    if match_row is None:
+        return None
+    if match_row["response_status"] == "unseen":
+        db.mark_match_viewed_if_unseen(match_row["id"])
+        match_row["response_status"] = "viewed"
+    return serialize_weekly_match(match_row)
+
+
+@app.post("/api/match/response")
+def match_response(body: MatchResponseBody, user=Depends(get_current_user)):
+    if body.status not in ("interested", "skipped", "viewed", "unseen"):
+        raise HTTPException(status_code=400, detail="非法的状态值")
+    # Go through get_fresh_match_for so an expired/blocked/paused match can't be
+    # acted on — serializing it back would leak the other person's contacts.
+    match_row = get_fresh_match_for(user["id"])
+    if match_row is None:
+        raise HTTPException(status_code=404, detail="没有当前推荐")
+    db.update_match_response_status(match_row["id"], body.status)
+    match_row["response_status"] = body.status
+    return serialize_weekly_match(match_row)
+
+
+@app.post("/api/match/dislike")
+def match_dislike(user=Depends(get_current_user)):
+    """Permanently exclude the current recommendation from both users' pools.
+
+    Distinct from response_status='skipped', which only means "not this week".
+    """
+    match_row = get_fresh_match_for(user["id"])
+    if match_row is None:
+        raise HTTPException(status_code=404, detail="没有当前推荐")
+    db.create_dislike(user["id"], match_row["matched_user_id"])
+    db.update_match_response_status(match_row["id"], "skipped")
+    return {"ok": True}
