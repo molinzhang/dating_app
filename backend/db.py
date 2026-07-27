@@ -163,6 +163,16 @@ def init_db():
             PRIMARY KEY (cycle_id, user_id)
         );
 
+        -- Photos live in the DB rather than on local disk: hosting platforms
+        -- give containers an ephemeral filesystem, so uploads would silently
+        -- disappear on every deploy or restart.
+        CREATE TABLE IF NOT EXISTS user_photos (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id),
+            content_type TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_responses_user_status
             ON questionnaire_responses(user_id, status);
         CREATE INDEX IF NOT EXISTS idx_matches_user
@@ -383,6 +393,37 @@ def create_weekly_match(user_id, matched_user_id, compatibility_summary, dimensi
 def update_match_response_status(match_row_id, status):
     with _cursor(commit=True) as cur:
         cur.execute("UPDATE weekly_matches SET response_status = %s WHERE id = %s", (status, match_row_id))
+
+
+# ------------------------------------------------------------ user photos ----
+
+def save_user_photo(user_id, content_type, data):
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            """INSERT INTO user_photos (user_id, content_type, data, updated_at)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (user_id) DO UPDATE
+                 SET content_type = EXCLUDED.content_type,
+                     data = EXCLUDED.data,
+                     updated_at = EXCLUDED.updated_at""",
+            (user_id, content_type, psycopg2.Binary(data), now_iso()),
+        )
+
+
+def get_user_photo(user_id):
+    with _cursor() as cur:
+        cur.execute("SELECT content_type, data, updated_at FROM user_photos WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def get_photo_versions_for(user_ids):
+    """updated_at per user, used to build cache-busting photo URLs."""
+    if not user_ids:
+        return {}
+    with _cursor() as cur:
+        cur.execute("SELECT user_id, updated_at FROM user_photos WHERE user_id = ANY(%s)", (list(user_ids),))
+        return {r["user_id"]: r["updated_at"] for r in cur.fetchall()}
 
 
 # ----------------------------------------------------------- match cycles ----

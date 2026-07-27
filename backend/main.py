@@ -1,12 +1,11 @@
 from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 from typing import Optional, Literal
+from urllib.parse import quote
 
-from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr
 
 import auth
@@ -14,8 +13,9 @@ import db
 import matching
 from questionnaire_config import ALL_QUESTION_IDS
 
-PHOTOS_DIR = Path(__file__).parent / "photos"
-PHOTOS_DIR.mkdir(exist_ok=True)
+ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_PHOTO_BYTES = 5 * 1024 * 1024
+_UNSET = object()
 
 db.init_db()
 
@@ -36,7 +36,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.mount("/api/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
 
 
 @app.get("/api/health")
@@ -47,10 +46,20 @@ def health():
 
 # ============================================================ serializers ==
 
-def serialize_user(user_row):
-    photo_url = f"/api/photos/{Path(user_row['photo_path']).name}" if user_row.get("photo_path") else None
+def _photo_url(user_id, version):
+    """Version the URL so a replaced photo isn't masked by a cached old one."""
+    if not version:
+        return None
+    return f"/api/photos/{user_id}?v={quote(version)}"
+
+
+def serialize_user(user_row, photo_version=_UNSET):
+    user_id = user_row["id"]
+    if photo_version is _UNSET:
+        photo = db.get_user_photo(user_id)
+        photo_version = photo["updated_at"] if photo else None
     return {
-        "id": str(user_row["id"]),
+        "id": str(user_id),
         "displayName": user_row["display_name"],
         "email": user_row["email"],
         "gender": user_row["gender"],
@@ -59,9 +68,9 @@ def serialize_user(user_row):
         "xiaohongshu": user_row.get("xiaohongshu"),
         "linkedin": user_row.get("linkedin"),
         "status": user_row["status"],
-        "questionnaireStatus": db.get_questionnaire_status(user_row["id"]),
+        "questionnaireStatus": db.get_questionnaire_status(user_id),
         "createdAt": user_row["created_at"],
-        "photoUrl": photo_url,
+        "photoUrl": _photo_url(user_id, photo_version),
         "bio": user_row.get("bio"),
         "matchPreference": user_row.get("match_preference"),
     }
@@ -83,8 +92,9 @@ def serialize_questionnaire(q):
 
 
 def serialize_weekly_match(match_row):
-    matched_user = db.get_user_by_id(match_row["matched_user_id"])
-    photo_url = f"/api/photos/{Path(matched_user['photo_path']).name}" if matched_user.get("photo_path") else None
+    matched_id = match_row["matched_user_id"]
+    matched_user = db.get_user_by_id(matched_id)
+    photo = db.get_user_photo(matched_id)
     return {
         "id": str(match_row["id"]),
         "matchedUser": {
@@ -92,7 +102,7 @@ def serialize_weekly_match(match_row):
             "email": matched_user["email"],
             "wechat": matched_user.get("wechat"),
             "instagram": matched_user.get("instagram"),
-            "photoUrl": photo_url,
+            "photoUrl": _photo_url(matched_id, photo["updated_at"] if photo else None),
         },
         "compatibilitySummary": match_row["compatibility_summary"],
         "dimensionComparisons": json.loads(match_row["dimension_comparisons"]),
@@ -290,11 +300,27 @@ def update_me(body: UpdateMeBody, user=Depends(get_current_user)):
 
 @app.post("/api/me/photo")
 def upload_photo(file: UploadFile = File(...), user=Depends(get_current_user)):
-    suffix = Path(file.filename).suffix or ".jpg"
-    dest = PHOTOS_DIR / f"{user['id']}{suffix}"
-    dest.write_bytes(file.file.read())
-    db.update_user(user["id"], {"photo_path": str(dest)})
+    if file.content_type not in ALLOWED_PHOTO_TYPES:
+        raise HTTPException(status_code=400, detail="只支持 JPEG / PNG / WebP 图片")
+    data = file.file.read(MAX_PHOTO_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="文件为空")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=400, detail="图片不能超过 5 MB")
+    db.save_user_photo(user["id"], file.content_type, data)
     return serialize_user(db.get_user_by_id(user["id"]))
+
+
+@app.get("/api/photos/{user_id}")
+def get_photo(user_id: int):
+    photo = db.get_user_photo(user_id)
+    if photo is None:
+        raise HTTPException(status_code=404, detail="没有照片")
+    return Response(
+        content=bytes(photo["data"]),
+        media_type=photo["content_type"],
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 # ========================================================== questionnaire ==
