@@ -42,7 +42,8 @@ interface QuestionnaireResponse {
 
 interface WeeklyMatch {
   id: string;
-  matchedUser: { displayName: string; email: string; wechat?: string; instagram?: string; photoUrl?: string; };
+  // Contact fields are omitted by the API once the match is skipped.
+  matchedUser: { displayName: string; email?: string; wechat?: string; instagram?: string; photoUrl?: string; };
   compatibilitySummary: string;
   dimensionComparisons: Array<{
     dimension: string; userScore: number; matchScore: number;
@@ -1304,6 +1305,7 @@ function DashboardPage() {
   // Derive state
   const qs = user.questionnaireStatus;
   const hasMatch = !!weeklyMatch && isActive && isVerified;
+  const isSkipped = weeklyMatch?.responseStatus === "skipped";
 
   const totalAnswered = questionnaire ? Object.keys(questionnaire.answers).length : 0;
   const pct = Math.round((totalAnswered / 24) * 100);
@@ -1375,7 +1377,7 @@ function DashboardPage() {
             </div>
           )}
           {/* State C — has match */}
-          {hasMatch && weeklyMatch && (
+          {hasMatch && weeklyMatch && !isSkipped && (
             <div className="bg-card rounded-2xl border border-[#2B5CE6]/30 p-6 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
                 <Heart size={16} className="text-[#2B5CE6]"/>
@@ -1406,6 +1408,30 @@ function DashboardPage() {
             </div>
           )}
 
+          {/* Skipped — kept visible so it's clear who was skipped and until when */}
+          {hasMatch && weeklyMatch && isSkipped && (
+            <div className="bg-muted/40 rounded-2xl border border-border p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <SkipForward size={16} className="text-muted-foreground"/>
+                <span className="text-sm font-medium text-muted-foreground">本周推荐已跳过</span>
+              </div>
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center text-muted-foreground font-bold text-lg grayscale">
+                  {weeklyMatch.matchedUser.photoUrl ? (
+                    <img src={resolvePhotoUrl(weeklyMatch.matchedUser.photoUrl)} alt={weeklyMatch.matchedUser.displayName} className="w-full h-full rounded-full object-cover opacity-50"/>
+                  ) : weeklyMatch.matchedUser.displayName.slice(0,1)}
+                </div>
+                <div>
+                  <p className="font-medium text-muted-foreground">你跳过了 {weeklyMatch.matchedUser.displayName}</p>
+                  <p className="text-xs text-muted-foreground">本周不再显示 TA 的联系方式</p>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                下次推荐将在 {weeklyMatch.nextRefreshDate} 更新。跳过只影响本周，之后你们仍可能再次匹配。
+              </p>
+            </div>
+          )}
+
           {/* State D — waiting */}
           {qs === "completed" && isActive && isVerified && !weeklyMatch && (
             <div className="bg-card rounded-2xl border border-border p-6">
@@ -1413,7 +1439,7 @@ function DashboardPage() {
                 <Clock size={20} className="text-muted-foreground"/>
                 <h2 className="font-semibold">新的推荐正在准备中</h2>
               </div>
-              <p className="text-muted-foreground text-sm">推荐每七天更新一次。下次推荐预计将在 2026-07-14 到来。耐心等待，只推荐认真筛选的人。</p>
+              <p className="text-muted-foreground text-sm">推荐每七天更新一次。耐心等待，只推荐认真筛选的人。</p>
             </div>
           )}
 
@@ -2030,9 +2056,25 @@ function MatchDetailPage() {
       <div className="max-w-2xl mx-auto px-4 py-24 text-center">
         <Clock size={48} className="mx-auto mb-4 text-muted-foreground opacity-30"/>
         <h2 className="text-2xl font-bold mb-2" style={{ fontFamily:"'Noto Serif SC', serif" }}>暂时没有推荐</h2>
-        <p className="text-muted-foreground mb-2">每七天更新一次推荐。下次推荐将在 2026-07-14 生成。</p>
+        <p className="text-muted-foreground mb-2">每七天更新一次推荐。</p>
         <p className="text-sm text-muted-foreground mb-6">在此期间，你可以回顾自己的价值画像。</p>
         <Btn variant="secondary" onClick={() => navigate("/results")}>查看价值画像</Btn>
+      </div>
+    );
+  }
+
+  if (weeklyMatch.responseStatus === "skipped") {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-24 text-center">
+        <SkipForward size={48} className="mx-auto mb-4 text-muted-foreground opacity-30"/>
+        <h2 className="text-2xl font-bold mb-2" style={{ fontFamily:"'Noto Serif SC', serif" }}>
+          你跳过了 {weeklyMatch.matchedUser.displayName}
+        </h2>
+        <p className="text-muted-foreground mb-2">本周不再显示 TA 的联系方式。</p>
+        <p className="text-sm text-muted-foreground mb-6">
+          下次推荐将在 {weeklyMatch.nextRefreshDate} 更新。跳过只影响本周，之后你们仍可能再次匹配。
+        </p>
+        <Btn variant="secondary" onClick={() => navigate("/dashboard")}>返回主页</Btn>
       </div>
     );
   }
@@ -2046,6 +2088,7 @@ function MatchDetailPage() {
   const categoryColor = { close:"bg-[#059669]/10 text-[#059669] border-[#059669]/20", complementary:"bg-[#2B5CE6]/10 text-[#2B5CE6] border-[#2B5CE6]/20", discuss:"bg-[#D97706]/10 text-[#D97706] border-[#D97706]/20" };
 
   const copyEmail = () => {
+    if (!m.matchedUser.email) return;
     navigator.clipboard.writeText(m.matchedUser.email).then(() => {
       setCopied(true);
       toast.success("邮箱已复制");
@@ -2207,7 +2250,7 @@ function MatchDetailPage() {
         <Btn onClick={() => { updateMatchResponse("interested"); toast.success("已标记为感兴趣！"); }}>
           <Heart size={16}/>我感兴趣
         </Btn>
-        <Btn variant="secondary" onClick={() => { updateMatchResponse("skipped"); toast("已跳过本次推荐。"); navigate("/dashboard"); }}>
+        <Btn variant="secondary" onClick={() => { updateMatchResponse("skipped"); toast("已跳过本周推荐，下周会为你重新匹配。"); navigate("/dashboard"); }}>
           <SkipForward size={16}/>暂时跳过
         </Btn>
         <Btn variant="ghost" size="sm" onClick={() => setShowReport(true)} className="text-muted-foreground">

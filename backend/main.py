@@ -95,15 +95,23 @@ def serialize_weekly_match(match_row):
     matched_id = match_row["matched_user_id"]
     matched_user = db.get_user_by_id(matched_id)
     photo = db.get_user_photo(matched_id)
-    return {
-        "id": str(match_row["id"]),
-        "matchedUser": {
-            "displayName": matched_user["display_name"],
+    # A skipped match stays visible so the dashboard can say who was skipped,
+    # but the contact details go away — the user dismissed this person, and
+    # contacts are only meant to be exposed for an active recommendation.
+    skipped = match_row["response_status"] == "skipped"
+    matched = {
+        "displayName": matched_user["display_name"],
+        "photoUrl": _photo_url(matched_id, photo["updated_at"] if photo else None),
+    }
+    if not skipped:
+        matched.update({
             "email": matched_user["email"],
             "wechat": matched_user.get("wechat"),
             "instagram": matched_user.get("instagram"),
-            "photoUrl": _photo_url(matched_id, photo["updated_at"] if photo else None),
-        },
+        })
+    return {
+        "id": str(match_row["id"]),
+        "matchedUser": matched,
         "compatibilitySummary": match_row["compatibility_summary"],
         "dimensionComparisons": json.loads(match_row["dimension_comparisons"]),
         "recommendationDate": match_row["recommendation_date"][:10],
