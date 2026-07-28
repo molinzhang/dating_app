@@ -121,7 +121,7 @@ interface AppCtx {
   weeklyMatch: WeeklyMatch | null;
   booting: boolean;
   navigate: (r: Route) => void;
-  login: (email: string, pw: string) => Promise<boolean>;
+  login: (email: string, pw: string) => Promise<string | null>;
   register: (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => Promise<string | null>;
   logout: () => void;
   updateUser: (u: Partial<AppUser>) => Promise<void>;
@@ -184,15 +184,19 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     window.scrollTo(0,0);
   }, [user]);
 
-  const login = useCallback(async (email: string, password: string): Promise<boolean> => {
+  const login = useCallback(async (email: string, password: string): Promise<string | null> => {
     try {
       const payload = await api.login({ email, password });
       setToken(payload.token);
       applyBootstrap(payload);
       setRoute("/dashboard");
-      return true;
-    } catch {
-      return false;
+      return null;
+    } catch (e) {
+      // Distinguish wrong credentials from the server being unreachable —
+      // reporting a network failure as "wrong password" sends people off
+      // resetting a password that was fine.
+      if (e instanceof ApiError && e.status === 401) return "邮箱或密码不正确，请重试。";
+      return e instanceof ApiError ? e.message : "登录失败，请稍后再试。";
     }
   }, [applyBootstrap]);
 
@@ -1016,9 +1020,9 @@ function LoginPage() {
     e.preventDefault();
     if (!email || !password) { setError("请填写邮箱和密码"); return; }
     setSubmitting(true);
-    const ok = await login(email, password);
+    const errorMessage = await login(email, password);
     setSubmitting(false);
-    if (!ok) setError("邮箱或密码不正确，请重试。");
+    if (errorMessage) setError(errorMessage);
   };
 
   return (

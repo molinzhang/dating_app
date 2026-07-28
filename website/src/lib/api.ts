@@ -18,6 +18,16 @@ export class ApiError extends Error {
   }
 }
 
+function messageFromDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  // FastAPI validation errors come back as an array of {loc, msg, type}.
+  if (Array.isArray(detail)) {
+    const msgs = detail.map((d: any) => d?.msg).filter(Boolean);
+    if (msgs.length) return msgs.join("；");
+  }
+  return fallback;
+}
+
 async function request(path: string, options: RequestInit = {}) {
   const token = getToken();
   const headers: Record<string, string> = { ...(options.headers as Record<string, string> | undefined) };
@@ -26,11 +36,25 @@ async function request(path: string, options: RequestInit = {}) {
   }
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+  } catch {
+    // fetch only rejects on network-level failure (server unreachable, DNS,
+    // CORS). The API sleeps after inactivity on its free tier and takes ~30s
+    // to wake, so retry once with a pause before giving up.
+    await new Promise(r => setTimeout(r, 3000));
+    try {
+      res = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
+    } catch {
+      throw new ApiError(0, "连不上服务器。服务器可能正在唤醒，请等约 30 秒后重试。");
+    }
+  }
+
   if (res.status === 204) return null;
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new ApiError(res.status, data?.detail || "请求失败，请稍后再试");
+    throw new ApiError(res.status, messageFromDetail(data?.detail, `请求失败（${res.status}）`));
   }
   return data;
 }
