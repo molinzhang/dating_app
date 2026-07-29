@@ -1,6 +1,6 @@
 # 后端、匹配算法与数据库 Agent 交接说明
 
-> 文档快照：2026-07-25
+> 文档快照：2026-07-29
 >
 > 目标：让负责 API、匹配算法和数据库的 Agent 能在不猜测前端行为的情况下开始实现
 >
@@ -239,6 +239,12 @@ alumniVerificationMethod: email | chsi | referral
     "23": 3,
     "24": 4
   },
+  "matchPreferences": {
+    "1": "same",
+    "2": "different",
+    "3": "any",
+    "4": "any"
+  },
   "importantQuestionIds": [1, 5, 7, 19, 23],
   "startedAt": "2026-07-25T18:00:00Z",
   "updatedAt": "2026-07-25T18:08:00Z",
@@ -263,6 +269,9 @@ alumniVerificationMethod: email | chsi | referral
 - `definitionVersion` 标识题目和维度定义。
 - `version` 是该用户的第几次完整问卷。
 - `revision` 用于草稿并发控制和幂等重试。
+- `matchPreferences` 以题号为键，值只能是 `any | same | different`；示例为缩写，正式响应应返回 1–24 的完整映射。
+- `any` 表示无所谓，`same` 表示要求同侧，`different` 表示要求异侧；旧问卷缺失字段或题号时按 `any` 处理。
+- 本人答案为 4 时没有左右方向，服务端应把该题偏好归一化为 `any`。
 - `dimensionScores` 由后端生成；前端不应作为权威计算者。
 - JSON 对象键会变成字符串，后端应按整数题号校验。
 
@@ -516,6 +525,12 @@ meta.nextCursor 为 null 表示结束
     "1": 5,
     "2": 3,
     "13": 4
+  },
+  "matchPreferences": {
+    "1": "same",
+    "2": "different",
+    "3": "any",
+    "13": "any"
   }
 }
 ```
@@ -525,6 +540,8 @@ meta.nextCursor 为 null 表示结束
 - 值只能是整数 `1..7`。
 - 题号必须属于该 `definitionVersion`。
 - `answers` 是该草稿的完整快照，但允许少于 24 题；服务端以该快照替换已有答案，不做隐式增量合并。
+- `matchPreferences` 使用 `any | same | different`；前端发送 1–24 的完整映射，旧客户端缺失字段时按全 `any` 兼容。
+- 未作答或答案为 4 的题必须保存为 `any`，不能保留 `same` 或 `different`。
 - 首次创建可省略 `revision`；更新时必须传最近响应中的 `revision`。
 - 成功响应返回完整草稿和递增后的新 `revision`。
 - 使用事务和 `revision` 防止旧请求覆盖新草稿；不匹配时返回 `409 REVISION_CONFLICT` 和服务端当前 revision。
@@ -536,7 +553,13 @@ meta.nextCursor 为 null 表示结束
 ```json
 {
   "revision": 12,
-  "importantQuestionIds": [1, 5, 7, 19, 23]
+  "importantQuestionIds": [1, 5, 7, 19, 23],
+  "matchPreferences": {
+    "1": "same",
+    "2": "different",
+    "3": "any",
+    "4": "any"
+  }
 }
 ```
 
@@ -546,6 +569,8 @@ meta.nextCursor 为 null 表示结束
 - 每题为 `1..7` 整数。
 - 重要题号去重且全部存在。
 - 重要题数量为 `3..5`。
+- `matchPreferences` 只包含合法题号和枚举值；提交载荷中的完整映射覆盖草稿值，避免最后一次自动保存竞态。
+- 答案为 4 的题必须归一化为 `any`。
 - 草稿属于当前用户且尚未提交。
 
 提交必须在一个事务中：
@@ -711,7 +736,27 @@ inappropriate_content | feels_fake | harassment | other
 2. 是否属于硬过滤、软偏好或完全不用。
 3. 如何处理非二元性别与隐私。
 
-### 7.2 可解释的 v1 相似度建议
+### 7.2 逐题匹配偏好硬筛选
+
+每道题先把 1–7 答案转换为方向：
+
+```text
+1..3 = left
+4    = neutral
+5..7 = right
+```
+
+对于规则设置者 A 和候选人 B：
+
+- `any`：该题直接通过。
+- A 选择 4：该题直接通过，不形成左右约束。
+- `same`：A、B 都必须非中立且位于同一侧。
+- `different`：A、B 都必须非中立且位于相反侧。
+- B 选择 4：不能满足 A 明确设置的 `same` 或 `different`。
+
+一对用户必须同时满足 A 对 B、B 对 A 的全部明确规则。任一方向的任一题不通过，这一对就不能进入彼此候选列表。该过滤必须发生在 Gale–Shapley 偏好排序和重要题权重计算之前；通过过滤的候选人继续使用现有评分方式。
+
+### 7.3 可解释的 v1 相似度建议
 
 前端答案范围为 `1..7`。可先将每题差异归一化：
 
@@ -748,7 +793,7 @@ percent = floor(((dimensionScore - 1) / 6 * 100) + 0.5)
 
 不要原样复用旧代码对正数 Likert 向量计算余弦相似度：全为正数时分数容易普遍偏高，而且无法自然表达“方向差异”和重要题权重。
 
-### 7.3 维度类别
+### 7.4 维度类别
 
 前端需要每个维度返回：
 
@@ -767,7 +812,7 @@ close | complementary | discuss
 
 当前第一个维度的中文名称顺序还与 1–7 分值方向相反；冻结定义时应分别保存稳定 `dimensionId`、`leftLabel`、`rightLabel`、正反向计分规则，不能用中文名称推断方向。
 
-### 7.4 每周配对
+### 7.5 每周配对
 
 v1 建议使用批处理的一对一、互惠配对：
 
@@ -848,6 +893,8 @@ MATCH_TIMEZONE=America/Los_Angeles
 - 部分草稿可保存并恢复。
 - 旧 `revision` 更新返回 `409 REVISION_CONFLICT`。
 - 缺题、越界值、重复重要题和少于 3/多于 5 个重要题均被拒绝。
+- `matchPreferences` 可随草稿保存和恢复，缺失的旧数据按全 `any` 返回。
+- 非法偏好值被拒绝；未作答或答案为 4 的题最终保存为 `any`。
 - 重复提交同一幂等请求只产生一个版本。
 - 新版本提交时旧 current 原子归档。
 - 维度分数使用正确的定义版本和映射。
@@ -857,6 +904,8 @@ MATCH_TIMEZONE=America/Los_Angeles
 - 自己、暂停、未认证、被屏蔽和无完整问卷的用户永不进入候选。
 - 同一周期用户不会出现在两个有效配对。
 - 固定输入和种子得到相同输出。
+- `same` 只接受同侧，`different` 只接受异侧，候选人的中立答案不能满足明确约束。
+- 双方任一人的硬性偏好不满足时，该配对在排序前被排除。
 - 重要题权重真实影响排序。
 - 没有候选时返回等待状态，而不是伪造推荐。
 
