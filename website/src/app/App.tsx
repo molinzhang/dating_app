@@ -3,8 +3,7 @@ import {
   Eye, EyeOff, Check, ChevronRight, ChevronLeft, Menu, X,
   Copy, Flag, LogOut, CheckCircle, Archive, ArrowRight,
   Clock, AlertTriangle, Sparkles, SkipForward, Lock, Star,
-  Heart, RotateCcw, Info, BadgeCheck, Zap, Shield, BookOpen, Camera, Pencil,
-  Mail, GraduationCap, Users
+  Heart, RotateCcw, Info, BadgeCheck, Zap, Shield, BookOpen, Camera, Pencil
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { api, ApiError, getToken, setToken, resolvePhotoUrl } from "../lib/api";
@@ -27,8 +26,6 @@ interface AppUser {
   photoUrl?: string;
   bio?: string;
   matchPreference?: string;
-  alumniVerificationStatus?: "unverified" | "verified";
-  alumniVerificationMethod?: "email" | "chsi" | "referral";
 }
 
 interface QuestionnaireResponse {
@@ -147,13 +144,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   const [booting, setBooting] = useState(true);
 
   const applyBootstrap = useCallback((payload: any) => {
-    // alumniVerificationStatus/Method are a frontend-only demo concept with
-    // no backend field — carry them over so a refetch doesn't reset them.
-    setUser(prev => ({
-      ...payload.user,
-      alumniVerificationStatus: prev?.alumniVerificationStatus ?? payload.user.alumniVerificationStatus ?? "unverified",
-      alumniVerificationMethod: prev?.alumniVerificationMethod ?? payload.user.alumniVerificationMethod,
-    }));
+    setUser(payload.user);
     setQuestionnaire(payload.questionnaire);
     setArchived(payload.archivedQuestionnaires ?? []);
     setWeeklyMatch(payload.weeklyMatch ?? null);
@@ -233,10 +224,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       await refreshMe();
-      return;
     }
-    // Fields with no backend counterpart yet (e.g. alumni verification demo) stay local-only.
-    setUser(prev => prev ? { ...prev, ...updates } : prev);
   }, [refreshMe]);
 
   const uploadPhoto = useCallback(async (file: File) => {
@@ -1062,88 +1050,6 @@ function LoginPage() {
 // DASHBOARD
 // ============================================================
 
-type VerificationMethod = NonNullable<AppUser["alumniVerificationMethod"]>;
-
-function AlumniVerificationCard({ user, onUpdate }: { user: AppUser; onUpdate: (u: Partial<AppUser>) => void }) {
-  const [selectedMethod, setSelectedMethod] = useState<VerificationMethod | null>(null);
-  const [credential, setCredential] = useState("");
-  const isVerified = user.alumniVerificationStatus === "verified";
-  const methodLabels: Record<VerificationMethod, string> = {
-    email:"校友邮箱", chsi:"学信网认证", referral:"已加入的校友推荐"
-  };
-  const methods: Array<{ id:VerificationMethod; icon:React.ReactNode; title:string; description:string; action:string; placeholder?:string }> = [
-    { id:"email", icon:<Mail size={21}/>, title:"校友邮箱", description:"使用学校签发的校友或教育邮箱完成验证。", action:"验证邮箱", placeholder:"name@alumni.edu" },
-    { id:"chsi", icon:<GraduationCap size={21}/>, title:"学信网认证", description:"通过学信网授权核验你的教育经历。", action:"前往认证" },
-    { id:"referral", icon:<Users size={21}/>, title:"已加入的校友推荐", description:"请一位已认证的校友为你的身份背书。", action:"使用推荐码", placeholder:"输入校友推荐码" },
-  ];
-
-  const completeVerification = (method: VerificationMethod) => {
-    if ((method === "email" || method === "referral") && !credential.trim()) {
-      toast.error(method === "email" ? "请输入校友邮箱" : "请输入校友推荐码");
-      return;
-    }
-    onUpdate({ alumniVerificationStatus:"verified", alumniVerificationMethod:method });
-    setSelectedMethod(null);
-    setCredential("");
-    toast.success("校友身份认证成功，推荐资格已解锁");
-  };
-
-  if (isVerified) {
-    return (
-      <div className="mb-8 rounded-2xl border border-[#059669]/25 bg-[#059669]/5 p-6">
-        <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-[#059669]/10 text-[#059669] flex items-center justify-center shrink-0"><BadgeCheck size={25}/></div>
-          <div className="flex-1">
-            <div className="flex flex-wrap items-center gap-2 mb-1">
-              <h2 className="font-semibold text-lg">校友身份已认证</h2>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-[#059669]/10 text-[#059669] font-medium">推荐资格已解锁</span>
-            </div>
-            <p className="text-sm text-muted-foreground">认证方式：{methodLabels[user.alumniVerificationMethod ?? "email"]}。你现在可以获得每周推荐。</p>
-          </div>
-          <button onClick={() => onUpdate({ alumniVerificationStatus:"unverified", alumniVerificationMethod:undefined })} className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-4">重新认证</button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="mb-8 rounded-2xl border border-[#D97706]/25 bg-card overflow-hidden">
-      <div className="p-6 border-b border-border bg-[#D97706]/5">
-        <div className="flex items-start gap-3">
-          <div className="w-11 h-11 rounded-2xl bg-[#D97706]/10 text-[#D97706] flex items-center justify-center shrink-0"><Shield size={22}/></div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2 mb-1">
-              <h2 className="font-semibold text-lg">完成校友认证，解锁推荐</h2>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-[#D97706]/10 text-[#D97706] font-medium">尚未认证</span>
-            </div>
-            <p className="text-sm text-muted-foreground">为了维护真实可信的校友社区，只有认证用户才会获得或出现在推荐中。</p>
-          </div>
-        </div>
-      </div>
-      <div className="grid md:grid-cols-3 gap-3 p-5">
-        {methods.map(method => (
-          <div key={method.id} className={cn("rounded-xl border p-4 transition-colors", selectedMethod === method.id ? "border-primary bg-primary/5" : "border-border")}>
-            <div className="w-9 h-9 rounded-xl bg-muted text-foreground flex items-center justify-center mb-3">{method.icon}</div>
-            <h3 className="font-semibold text-sm mb-1">{method.title}</h3>
-            <p className="text-xs text-muted-foreground leading-relaxed min-h-10 mb-3">{method.description}</p>
-            {selectedMethod === method.id ? (
-              <div className="space-y-2">
-                {method.placeholder && <input value={credential} onChange={e => setCredential(e.target.value)} placeholder={method.placeholder} className="w-full px-3 py-2 rounded-lg border border-border bg-input-background text-sm focus:outline-none focus:ring-2 focus:ring-ring"/>}
-                <div className="flex gap-2">
-                  <Btn size="sm" onClick={() => completeVerification(method.id)}>确认认证</Btn>
-                  <Btn size="sm" variant="ghost" onClick={() => { setSelectedMethod(null); setCredential(""); }}>取消</Btn>
-                </div>
-              </div>
-            ) : (
-              <button onClick={() => setSelectedMethod(method.id)} className="text-sm text-primary font-medium hover:underline">{method.action} <ChevronRight size={14} className="inline"/></button>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdate: (u: Partial<AppUser>) => void; onUploadPhoto: (file: File) => Promise<void> }) {
   const [editing, setEditing] = useState(false);
   const [bio, setBio] = useState(user.bio ?? "");
@@ -1295,7 +1201,6 @@ function DashboardPage() {
   if (!user) return null;
 
   const isActive = user.status === "active";
-  const isVerified = user.alumniVerificationStatus === "verified";
 
   const handleStatusToggle = () => {
     if (isActive) setShowPauseModal(true);
@@ -1304,7 +1209,7 @@ function DashboardPage() {
 
   // Derive state
   const qs = user.questionnaireStatus;
-  const hasMatch = !!weeklyMatch && isActive && isVerified;
+  const hasMatch = !!weeklyMatch && isActive;
   const isSkipped = weeklyMatch?.responseStatus === "skipped";
 
   const totalAnswered = questionnaire ? Object.keys(questionnaire.answers).length : 0;
@@ -1320,9 +1225,6 @@ function DashboardPage() {
         </div>
         <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
       </div>
-
-      {/* Alumni verification */}
-      <AlumniVerificationCard user={user} onUpdate={updateUser}/>
 
       {/* Profile card */}
       <ProfileCard user={user} onUpdate={updateUser} onUploadPhoto={uploadPhoto}/>
@@ -1369,13 +1271,6 @@ function DashboardPage() {
       {/* State C/D/E — completed */}
       {qs === "completed" && (
         <div className="space-y-6">
-          {!isVerified && (
-            <div className="rounded-2xl border border-dashed border-[#D97706]/40 bg-[#D97706]/5 p-6 text-center">
-              <Lock size={28} className="mx-auto text-[#D97706] mb-3"/>
-              <h2 className="font-semibold text-lg mb-1">本周推荐尚未解锁</h2>
-              <p className="text-sm text-muted-foreground">完成上方任意一种校友认证后，系统才会为你生成和展示推荐。</p>
-            </div>
-          )}
           {/* State C — has match */}
           {hasMatch && weeklyMatch && !isSkipped && (
             <div className="bg-card rounded-2xl border border-[#2B5CE6]/30 p-6 shadow-sm">
@@ -1433,7 +1328,7 @@ function DashboardPage() {
           )}
 
           {/* State D — waiting */}
-          {qs === "completed" && isActive && isVerified && !weeklyMatch && (
+          {qs === "completed" && isActive && !weeklyMatch && (
             <div className="bg-card rounded-2xl border border-border p-6">
               <div className="flex items-center gap-3 mb-3">
                 <Clock size={20} className="text-muted-foreground"/>
@@ -2028,17 +1923,6 @@ function MatchDetailPage() {
   const [showReport, setShowReport] = useState(false);
 
   useEffect(() => { refreshMatch(); }, [refreshMatch]);
-
-  if (user && user.alumniVerificationStatus !== "verified") {
-    return (
-      <div className="max-w-2xl mx-auto px-4 py-24 text-center">
-        <Shield size={48} className="mx-auto mb-4 text-[#D97706] opacity-70"/>
-        <h2 className="text-2xl font-bold mb-2" style={{ fontFamily:"'Noto Serif SC', serif" }}>完成校友认证后查看推荐</h2>
-        <p className="text-muted-foreground mb-6">认证校友身份后，你才会获得并可以查看每周推荐。</p>
-        <Btn onClick={() => navigate("/dashboard")}>前往认证</Btn>
-      </div>
-    );
-  }
 
   if (!user || user.status !== "active") {
     return (
