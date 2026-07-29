@@ -1298,7 +1298,12 @@ function DashboardPage() {
             <h2 className="text-3xl font-bold mb-3" style={{ fontFamily:"'Noto Serif SC', serif" }}>从认识自己开始</h2>
             <p className="opacity-90 text-lg mb-2">完成24道核心价值问题，生成你的个人价值画像，并开启每周匹配。</p>
             <p className="opacity-70 text-sm mb-8">约6–8分钟 · 没有正确答案 · 可随时保存</p>
-            <Btn size="lg" className="bg-white text-[#E85D26] hover:bg-white/90" onClick={() => navigate("/questionnaire")}>
+            <Btn
+              size="lg"
+              className="shadow-lg hover:brightness-95"
+              style={{ backgroundColor:"#FFFFFF", color:"#9A3412" }}
+              onClick={() => navigate("/questionnaire")}
+            >
               开始填写问卷 <ArrowRight size={20}/>
             </Btn>
           </div>
