@@ -37,6 +37,8 @@ interface QuestionnaireResponse {
   currentSection: number;
 }
 
+type MatchState = { state: "pending" | "unmatched"; nextRefreshDate: string | null };
+
 interface WeeklyMatch {
   id: string;
   // Contact fields are omitted by the API once the match is skipped.
@@ -117,6 +119,7 @@ interface AppCtx {
   questionnaire: QuestionnaireResponse | null;
   archivedQuestionnaires: QuestionnaireResponse[];
   weeklyMatch: WeeklyMatch | null;
+  matchState: MatchState | null;
   booting: boolean;
   navigate: (r: Route) => void;
   login: (email: string, pw: string) => Promise<string | null>;
@@ -141,6 +144,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   const [questionnaire, setQuestionnaire] = useState<QuestionnaireResponse | null>(null);
   const [archivedQuestionnaires, setArchived] = useState<QuestionnaireResponse[]>([]);
   const [weeklyMatch, setWeeklyMatch] = useState<WeeklyMatch | null>(null);
+  const [matchState, setMatchState] = useState<MatchState | null>(null);
   const [booting, setBooting] = useState(true);
 
   const applyBootstrap = useCallback((payload: any) => {
@@ -148,11 +152,12 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     setQuestionnaire(payload.questionnaire);
     setArchived(payload.archivedQuestionnaires ?? []);
     setWeeklyMatch(payload.weeklyMatch ?? null);
+    setMatchState(payload.matchState ?? null);
   }, []);
 
   const clearSession = useCallback(() => {
     setToken(null);
-    setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null);
+    setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null); setMatchState(null);
   }, []);
 
   const refreshMe = useCallback(async () => {
@@ -267,7 +272,14 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   const refreshMatch = useCallback(async () => {
     try {
-      setWeeklyMatch(await api.matchCurrent());
+      const res = await api.matchCurrent();
+      if (res && "state" in res) {
+        setWeeklyMatch(null);
+        setMatchState(res as MatchState);
+      } else {
+        setWeeklyMatch(res);
+        setMatchState(null);
+      }
     } catch {}
   }, []);
 
@@ -288,7 +300,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <Ctx.Provider value={{
-      route, user, questionnaire, archivedQuestionnaires, weeklyMatch, booting,
+      route, user, questionnaire, archivedQuestionnaires, weeklyMatch, matchState, booting,
       navigate, login, register, logout, updateUser, uploadPhoto,
       saveAnswers, submitQuestionnaire, retakeQuestionnaire, refreshMatch,
       updateMatchResponse, dislikeMatch,
@@ -1214,7 +1226,7 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
 }
 
 function DashboardPage() {
-  const { user, questionnaire, weeklyMatch, navigate, updateUser, uploadPhoto } = useApp();
+  const { user, questionnaire, weeklyMatch, matchState, navigate, updateUser, uploadPhoto } = useApp();
   const [showPauseModal, setShowPauseModal] = useState(false);
 
   if (!user) return null;
@@ -1349,11 +1361,35 @@ function DashboardPage() {
           {/* State D — waiting */}
           {qs === "completed" && isActive && !weeklyMatch && (
             <div className="bg-card rounded-2xl border border-border p-6">
-              <div className="flex items-center gap-3 mb-3">
-                <Clock size={20} className="text-muted-foreground"/>
-                <h2 className="font-semibold">新的推荐正在准备中</h2>
-              </div>
-              <p className="text-muted-foreground text-sm">推荐每七天更新一次。耐心等待，只推荐认真筛选的人。</p>
+              {matchState?.state === "unmatched" ? (
+                <>
+                  <div className="flex items-center gap-3 mb-3">
+                    <Info size={20} className="text-[#D97706]"/>
+                    <h2 className="font-semibold">本周没有找到合适的人选</h2>
+                  </div>
+                  <p className="text-muted-foreground text-sm">
+                    本周的匹配已经完成，但这一轮没有为你找到合适的对象。
+                    {matchState.nextRefreshDate
+                      ? ` 下一轮匹配将在 ${matchState.nextRefreshDate} 进行，敬请期待。`
+                      : " 请期待下一轮匹配。"}
+                  </p>
+                  <p className="text-muted-foreground text-xs mt-2">
+                    我们只做双向合适的推荐，宁缺毋滥。随着更多人加入，匹配到的机会会变大。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-3 mb-3">
+                    <Clock size={20} className="text-muted-foreground"/>
+                    <h2 className="font-semibold">新的推荐正在准备中</h2>
+                  </div>
+                  <p className="text-muted-foreground text-sm">
+                    推荐每七天更新一次
+                    {matchState?.nextRefreshDate ? `，下一轮将在 ${matchState.nextRefreshDate} 进行` : ""}
+                    。耐心等待，只推荐认真筛选的人。
+                  </p>
+                </>
+              )}
             </div>
           )}
 
@@ -1937,7 +1973,7 @@ function ArchivePage() {
 // ============================================================
 
 function MatchDetailPage() {
-  const { weeklyMatch, navigate, updateMatchResponse, user, refreshMatch, dislikeMatch } = useApp();
+  const { weeklyMatch, matchState, navigate, updateMatchResponse, user, refreshMatch, dislikeMatch } = useApp();
   const [copied, setCopied] = useState(false);
   const [showReport, setShowReport] = useState(false);
 
@@ -1955,11 +1991,21 @@ function MatchDetailPage() {
   }
 
   if (!weeklyMatch) {
+    const unmatched = matchState?.state === "unmatched";
     return (
       <div className="max-w-2xl mx-auto px-4 py-24 text-center">
-        <Clock size={48} className="mx-auto mb-4 text-muted-foreground opacity-30"/>
-        <h2 className="text-2xl font-bold mb-2" style={{ fontFamily:"'Noto Serif SC', serif" }}>暂时没有推荐</h2>
-        <p className="text-muted-foreground mb-2">每七天更新一次推荐。</p>
+        {unmatched
+          ? <Info size={48} className="mx-auto mb-4 text-[#D97706] opacity-70"/>
+          : <Clock size={48} className="mx-auto mb-4 text-muted-foreground opacity-30"/>}
+        <h2 className="text-2xl font-bold mb-2" style={{ fontFamily:"'Noto Serif SC', serif" }}>
+          {unmatched ? "本周没有找到合适的人选" : "暂时没有推荐"}
+        </h2>
+        <p className="text-muted-foreground mb-2">
+          {unmatched
+            ? "本周的匹配已经完成，但这一轮没有为你找到合适的对象。"
+            : "每七天更新一次推荐。"}
+          {matchState?.nextRefreshDate ? `下一轮匹配将在 ${matchState.nextRefreshDate} 进行。` : ""}
+        </p>
         <p className="text-sm text-muted-foreground mb-6">在此期间，你可以回顾自己的价值画像。</p>
         <Btn variant="secondary" onClick={() => navigate("/results")}>查看价值画像</Btn>
       </div>

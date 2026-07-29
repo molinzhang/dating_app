@@ -230,17 +230,36 @@ class LoginBody(BaseModel):
     password: str
 
 
+def get_match_state(user_id):
+    """Why the user has no match, so the UI can say something true.
+
+    'unmatched' means this week's pairing ran and left them out (the pool is
+    lopsided, so min(男,女) pairs leaves the larger side over) — different from
+    'pending', where no pairing has covered them yet.
+    """
+    now = datetime.now(timezone.utc)
+    cycle = db.get_active_cycle(now.isoformat())
+    if cycle is None:
+        return {"state": "pending", "nextRefreshDate": None}
+    if user_id not in db.get_cycle_participants(cycle["id"]):
+        return {"state": "pending", "nextRefreshDate": cycle["next_refresh_date"][:10]}
+    return {"state": "unmatched", "nextRefreshDate": cycle["next_refresh_date"][:10]}
+
+
 def _bootstrap_payload(user_row):
     user_id = user_row["id"]
     questionnaire = db.get_current_response(user_id) or db.get_draft_response(user_id)
     archived = db.get_archived_responses(user_id)
     match_row = get_fresh_match_for(user_id) if user_row["status"] == "active" else None
-    return {
+    payload = {
         "user": serialize_user(user_row),
         "questionnaire": serialize_questionnaire(questionnaire),
         "archivedQuestionnaires": [serialize_questionnaire(q) for q in archived],
         "weeklyMatch": serialize_weekly_match(match_row) if match_row else None,
     }
+    if match_row is None and user_row["status"] == "active" and questionnaire and questionnaire["status"] == "current":
+        payload["matchState"] = get_match_state(user_id)
+    return payload
 
 
 @app.post("/api/register")
@@ -406,6 +425,10 @@ def match_current(user=Depends(get_current_user)):
         return None
     match_row = get_fresh_match_for(user["id"])
     if match_row is None:
+        # Not just null: the UI needs to distinguish "left out of this week's
+        # pairing" from "no pairing has run yet".
+        if db.get_current_response(user["id"]):
+            return {"match": None, **get_match_state(user["id"])}
         return None
     if match_row["response_status"] == "unseen":
         db.mark_match_viewed_if_unseen(match_row["id"])

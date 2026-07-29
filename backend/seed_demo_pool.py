@@ -20,8 +20,12 @@ from seed_fake_data import ARCHETYPES, BIOS, IMPORTANT_IDS_BY_ARCHETYPE, jitter
 random.seed(11)
 
 SPARE_NAMES = {
-    "男": ["沈亦舟", "顾南辰", "程屿", "秦砚", "谢予怀", "许知远", "陆时衍", "江砚白"],
-    "女": ["苏晚意", "温言", "叶知秋", "白露", "沈清欢", "夏栀", "宋雨薇", "柳依依"],
+    "男": ["沈亦舟", "顾南辰", "程屿", "秦砚", "谢予怀", "许知远", "陆时衍", "江砚白",
+           "裴让", "宋照野", "闻朝", "霍屿川", "梁越", "周知行", "傅深", "邵珩",
+           "唐斯言", "卫朗", "冯彻", "元也"],
+    "女": ["苏晚意", "温言", "叶知秋", "白露", "沈清欢", "夏栀", "宋雨薇", "柳依依",
+           "林知夏", "许清和", "陆昭昭", "阮眠", "祝清欢", "闻笙", "南枝", "顾未晚",
+           "简溪", "岑晚", "初禾", "俞棠"],
 }
 
 
@@ -64,16 +68,26 @@ def main(spare_per_gender=4):
 
     for gender, have in (("男", men), ("女", women)):
         need = target - have
-        for i in range(need):
-            names = SPARE_NAMES[gender]
-            if i >= len(names):
-                print(f"  ⚠️  {gender} 备用名字用完了，只创建了 {i} 个（需要 {need}）")
+        if need <= 0:
+            continue
+        names = SPARE_NAMES[gender]
+        prefix = "m" if gender == "男" else "f"
+        made_here = 0
+        # Scan for free slots rather than indexing by loop position: earlier
+        # runs already claimed demo_m0.., so restarting at 0 would just find
+        # existing accounts and create nothing.
+        for slot in range(len(names)):
+            if made_here >= need:
                 break
-            email = f"demo_{'m' if gender == '男' else 'f'}{i}@example.com"
-            _, made = ensure_user(email, names[i], gender, archetypes[i % len(archetypes)])
-            if made:
-                created += 1
-                print(f"  + {names[i]} ({gender}) {email}")
+            email = f"demo_{prefix}{slot}@example.com"
+            if db.get_user_by_email(email):
+                continue
+            ensure_user(email, names[slot], gender, archetypes[slot % len(archetypes)])
+            created += 1
+            made_here += 1
+            print(f"  + {names[slot]} ({gender}) {email}")
+        if made_here < need:
+            print(f"  ⚠️  {gender} 备用名字不够，还差 {need - made_here} 个（请在 SPARE_NAMES 里加名字）")
 
     men, women = matchable_counts()
     print(f"\n新增 {created} 人，现在可匹配：男 {men} / 女 {women}")
