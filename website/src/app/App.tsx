@@ -574,7 +574,7 @@ function Header() {
             ) : (
               <>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/")}>首页</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/login")}>关于匹配</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/")}>关于匹配</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/login")}>登录</Btn>
                 <Btn variant="primary" size="sm" onClick={() => navigate("/register")}>开始探索</Btn>
               </>
@@ -633,7 +633,11 @@ function Header() {
 }
 
 function Footer() {
-  const { navigate } = useApp();
+  const { navigate, user } = useApp();
+  // Signed-in visitors shouldn't be pointed back at register/login.
+  const accountLinks = user
+    ? [{ label: "我的主页", r: "/dashboard" as Route }, { label: "问卷结果", r: "/results" as Route }]
+    : [{ label: "登录", r: "/login" as Route }, { label: "注册", r: "/register" as Route }];
   return (
     <footer className="border-t border-border mt-24 bg-secondary">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12 grid grid-cols-2 md:grid-cols-4 gap-8">
@@ -642,8 +646,8 @@ function Footer() {
           <p className="text-sm text-muted-foreground">从三观开始，认识真实的人。</p>
         </div>
         {[
-          { title:"产品", links:[{ label:"首页", r:"/" as Route },{ label:"关于匹配", r:"/" as Route },{ label:"开始探索", r:"/register" as Route }] },
-          { title:"账号", links:[{ label:"登录", r:"/login" as Route },{ label:"注册", r:"/register" as Route }] },
+          { title:"产品", links:[{ label:"首页", r:"/" as Route },{ label:"关于匹配", r:"/" as Route }, ...(user ? [] : [{ label:"开始探索", r:"/register" as Route }])] },
+          { title:"账号", links: accountLinks },
           { title:"关于", links:[{ label:"隐私政策", r:"/" as Route },{ label:"服务条款", r:"/" as Route },{ label:"联系我们", r:"/" as Route }] },
         ].map(col => (
           <div key={col.title}>
@@ -731,6 +735,21 @@ function ValueSpectrumViz({ userAnswers, matchAnswers, size = 320 }: {
 function LandingPage() {
   const { navigate, user } = useApp();
   const DIMENSIONS_PREVIEW = ["探索与稳定","独立与联结","成就与生活","金钱与体验","公平与责任","信任与能动性","沟通与亲密"];
+
+  // Send signed-in visitors to wherever they actually left off, rather than
+  // back to a registration form they've already completed.
+  const ctaRoute: Route = !user
+    ? "/register"
+    : user.questionnaireStatus === "completed"
+      ? "/dashboard"
+      : "/questionnaire";
+  const ctaLabel = !user
+    ? "完成问卷，开启匹配"
+    : user.questionnaireStatus === "completed"
+      ? "查看我的本周推荐"
+      : user.questionnaireStatus === "in_progress"
+        ? "继续填写问卷"
+        : "开始填写问卷";
 
   return (
     <div>
@@ -842,8 +861,8 @@ function LandingPage() {
             </div>
             <p className="text-sm text-muted-foreground mb-4">你们在5个核心维度上高度接近</p>
             <ValueSpectrumViz size={220}/>
-            <Btn variant="secondary" className="w-full mt-4" onClick={() => navigate("/register")}>
-              完成问卷，开启匹配
+            <Btn variant="secondary" className="w-full mt-4" onClick={() => navigate(ctaRoute)}>
+              {ctaLabel}
             </Btn>
           </div>
         </div>
