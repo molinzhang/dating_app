@@ -1,6 +1,8 @@
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:8000";
 const TOKEN_KEY = "cg_token";
 
+type MatchPreference = "any" | "same" | "different";
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -73,9 +75,16 @@ export const api = {
     form.append("file", file);
     return request("/api/me/photo", { method: "POST", body: form });
   },
-  saveAnswers: (body: { answers: Record<number, number>; currentSection: number }) =>
+  saveAnswers: (body: {
+    answers: Record<number, number>;
+    matchPreferences: Record<number, MatchPreference>;
+    currentSection: number;
+  }) =>
     request("/api/questionnaire", { method: "PUT", body: JSON.stringify(body) }),
-  submitQuestionnaire: (body: { importantQuestionIds: number[] }) =>
+  submitQuestionnaire: (body: {
+    importantQuestionIds: number[];
+    matchPreferences: Record<number, MatchPreference>;
+  }) =>
     request("/api/questionnaire/submit", { method: "POST", body: JSON.stringify(body) }),
   retakeQuestionnaire: () => request("/api/questionnaire/retake", { method: "POST" }),
   questionnaireArchive: () => request("/api/questionnaire/archive"),
