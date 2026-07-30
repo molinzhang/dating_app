@@ -36,7 +36,11 @@ pnpm build
 2. 提交一份不含敏感值的 `.env.example`。
 3. 将 `src/app/App.tsx` 中 `AppProvider` 的本地演示方法替换为 API 调用。
 
-建议的后端接口和现有数据模型见 [BACKEND_INTEGRATION.md](./BACKEND_INTEGRATION.md)。
+项目交接文档：
+
+- [当前网站功能说明](../docs/CURRENT_WEBSITE_FUNCTIONS.md)
+- [后端、匹配算法与数据库 Agent 交接说明](../docs/BACKEND_ALGORITHM_DATABASE_AGENT_GUIDE.md)
+- [后端接入文档入口](./BACKEND_INTEGRATION.md)
 
 ## 会提交与不会提交的内容
 

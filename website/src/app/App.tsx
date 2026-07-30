@@ -7,6 +7,9 @@ import {
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { api, ApiError, getToken, setToken, resolvePhotoUrl } from "../lib/api";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "./components/ui/select";
 
 // ============================================================
 // TYPES
@@ -16,6 +19,8 @@ type Route =
   | "/" | "/register" | "/login" | "/dashboard"
   | "/questionnaire" | "/questionnaire/complete"
   | "/results" | "/results/archive" | "/matches/current";
+
+type MatchPreference = "any" | "same" | "different";
 
 interface AppUser {
   id: string; displayName: string; email: string; gender: "男" | "女";
@@ -31,6 +36,7 @@ interface AppUser {
 interface QuestionnaireResponse {
   id: string; version: number;
   answers: Record<number, number>;
+  matchPreferences: Record<number, MatchPreference>;
   importantQuestionIds: number[];
   startedAt: string; completedAt?: string;
   status: "draft" | "current" | "archived";
@@ -91,6 +97,25 @@ const QUESTIONS = [
   { id:24, topic:"坚持与止损", left:"关系遇到长期困难时，应尽最大努力磨合和修复", right:"如果核心需求长期无法满足，及时结束也很负责" },
 ];
 
+function normalizeMatchPreferences(
+  preferences?: Partial<Record<number, MatchPreference>> | null,
+  answers?: Record<number, number> | null,
+): Record<number, MatchPreference> {
+  return Object.fromEntries(QUESTIONS.map(({ id }) => {
+    if (answers && (answers[id] === undefined || answers[id] === 4)) return [id, "any"];
+    const preference = preferences?.[id];
+    return [id, preference === "same" || preference === "different" ? preference : "any"];
+  })) as Record<number, MatchPreference>;
+}
+
+function normalizeQuestionnaireResponse(response: any): QuestionnaireResponse | null {
+  if (!response) return null;
+  return {
+    ...response,
+    matchPreferences: normalizeMatchPreferences(response.matchPreferences, response.answers),
+  };
+}
+
 const VALUE_DIMENSIONS = [
   { name:"探索开放 ↔ 稳定守序", leftLabel:"稳定守序", rightLabel:"探索开放", questionIds:[1,2,3], color:"#E85D26" },
   { name:"独立空间 ↔ 社交联结", leftLabel:"独立空间", rightLabel:"社交联结", questionIds:[4,5,6], color:"#2B5CE6" },
@@ -127,8 +152,8 @@ interface AppCtx {
   logout: () => void;
   updateUser: (u: Partial<AppUser>) => Promise<void>;
   uploadPhoto: (file: File) => Promise<void>;
-  saveAnswers: (answers: Record<number, number>, section: number) => void;
-  submitQuestionnaire: (importantIds: number[]) => Promise<void>;
+  saveAnswers: (answers: Record<number, number>, matchPreferences: Record<number, MatchPreference>, section: number) => void;
+  submitQuestionnaire: (importantIds: number[], matchPreferences: Record<number, MatchPreference>) => Promise<void>;
   retakeQuestionnaire: () => Promise<void>;
   refreshMatch: () => Promise<void>;
   updateMatchResponse: (status: WeeklyMatch["responseStatus"]) => void;
@@ -149,8 +174,8 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   const applyBootstrap = useCallback((payload: any) => {
     setUser(payload.user);
-    setQuestionnaire(payload.questionnaire);
-    setArchived(payload.archivedQuestionnaires ?? []);
+    setQuestionnaire(normalizeQuestionnaireResponse(payload.questionnaire));
+    setArchived((payload.archivedQuestionnaires ?? []).map((q: any) => normalizeQuestionnaireResponse(q)!));
     setWeeklyMatch(payload.weeklyMatch ?? null);
     setMatchState(payload.matchState ?? null);
   }, []);
@@ -241,18 +266,35 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const saveAnswers = useCallback((answers: Record<number, number>, section: number) => {
-    api.saveAnswers({ answers, currentSection: section })
+  const saveAnswers = useCallback((
+    answers: Record<number, number>,
+    matchPreferences: Record<number, MatchPreference>,
+    section: number,
+  ) => {
+    const normalizedPreferences = normalizeMatchPreferences(matchPreferences, answers);
+    api.saveAnswers({ answers, matchPreferences: normalizedPreferences, currentSection: section })
       .then((next: QuestionnaireResponse) => {
-        setQuestionnaire(next);
+        setQuestionnaire({
+          ...next,
+          matchPreferences: normalizeMatchPreferences(
+            next.matchPreferences ?? normalizedPreferences,
+            next.answers ?? answers,
+          ),
+        });
         setUser(u => u ? { ...u, questionnaireStatus: "in_progress" } : u);
       })
       .catch(() => {});
   }, []);
 
-  const submitQuestionnaire = useCallback(async (importantIds: number[]) => {
+  const submitQuestionnaire = useCallback(async (
+    importantIds: number[],
+    matchPreferences: Record<number, MatchPreference>,
+  ) => {
     try {
-      await api.submitQuestionnaire({ importantQuestionIds: importantIds });
+      await api.submitQuestionnaire({
+        importantQuestionIds: importantIds,
+        matchPreferences: normalizeMatchPreferences(matchPreferences),
+      });
       await refreshMe();
       setRoute("/questionnaire/complete");
     } catch (e) {
@@ -1268,7 +1310,12 @@ function DashboardPage() {
             <h2 className="text-3xl font-bold mb-3" style={{ fontFamily:"'Noto Serif SC', serif" }}>从认识自己开始</h2>
             <p className="opacity-90 text-lg mb-2">完成24道核心价值问题，生成你的个人价值画像，并开启每周匹配。</p>
             <p className="opacity-70 text-sm mb-8">约6–8分钟 · 没有正确答案 · 可随时保存</p>
-            <Btn size="lg" className="bg-white text-[#E85D26] hover:bg-white/90" onClick={() => navigate("/questionnaire")}>
+            <Btn
+              size="lg"
+              className="shadow-lg hover:brightness-95"
+              style={{ backgroundColor:"#FFFFFF", color:"#9A3412" }}
+              onClick={() => navigate("/questionnaire")}
+            >
               开始填写问卷 <ArrowRight size={20}/>
             </Btn>
           </div>
@@ -1480,6 +1527,9 @@ function QuestionnairePage() {
   const { questionnaire, saveAnswers, submitQuestionnaire, navigate } = useApp();
   const [currentSection, setCurrentSection] = useState(questionnaire?.currentSection ?? 1);
   const [answers, setAnswers] = useState<Record<number, number>>(questionnaire?.answers ?? {});
+  const [matchPreferences, setMatchPreferences] = useState<Record<number, MatchPreference>>(
+    () => normalizeMatchPreferences(questionnaire?.matchPreferences, questionnaire?.answers),
+  );
   const [showImportance, setShowImportance] = useState(false);
   const [importantIds, setImportantIds] = useState<number[]>(questionnaire?.importantQuestionIds ?? []);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -1497,14 +1547,23 @@ function QuestionnairePage() {
   // Autosave
   useEffect(() => {
     const timer = setTimeout(() => {
-      saveAnswers(answers, currentSection);
+      saveAnswers(answers, matchPreferences, currentSection);
     }, 1000);
     return () => clearTimeout(timer);
-  }, [answers, currentSection]);
+  }, [answers, currentSection, matchPreferences, saveAnswers]);
 
   const handleAnswer = (questionId: number, value: number) => {
     setAnswers(prev => ({ ...prev, [questionId]: value }));
+    if (value === 4) {
+      setMatchPreferences(prev => (
+        prev[questionId] === "any" ? prev : { ...prev, [questionId]: "any" }
+      ));
+    }
     setUnansweredWarning(false);
+  };
+
+  const handleMatchPreference = (questionId: number, preference: MatchPreference) => {
+    setMatchPreferences(prev => ({ ...prev, [questionId]: preference }));
   };
 
   const goNext = () => {
@@ -1536,7 +1595,7 @@ function QuestionnairePage() {
 
   const confirmSubmit = () => {
     setShowConfirm(false);
-    submitQuestionnaire(importantIds);
+    submitQuestionnaire(importantIds, matchPreferences);
   };
 
   return (
@@ -1590,21 +1649,61 @@ function QuestionnairePage() {
             </div>
 
             <div className="space-y-10">
-              {sectionQuestions.map((q, idx) => (
-                <div key={q.id} className="bg-card rounded-2xl border border-border p-6">
-                  <div className="flex items-center gap-2 mb-4">
-                    <span className="text-xs text-muted-foreground font-medium">Q{q.id}</span>
-                    <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full">{q.topic}</span>
-                    {answers[q.id] !== undefined && <Check size={14} className="text-[#059669] ml-auto"/>}
+              {sectionQuestions.map(q => {
+                const answer = answers[q.id];
+                const matchPreference = matchPreferences[q.id] ?? "any";
+                const preferenceDisabled = answer === undefined || answer === 4;
+                const isHardFilter = matchPreference === "same" || matchPreference === "different";
+
+                return (
+                  <div key={q.id} className="bg-card rounded-2xl border border-border p-6">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="text-xs text-muted-foreground font-medium">Q{q.id}</span>
+                      <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded-full">{q.topic}</span>
+                      {answers[q.id] !== undefined && <Check size={14} className="text-[#059669] ml-auto"/>}
+                    </div>
+                    <SpectrumSlider
+                      value={answers[q.id] ?? 0}
+                      onChange={v => handleAnswer(q.id, v)}
+                      leftLabel={q.left}
+                      rightLabel={q.right}
+                    />
+                    <div className="mt-6 pt-5 border-t border-border/70">
+                      <label className="block text-sm font-medium mb-2" id={`match-preference-label-${q.id}`}>
+                        我希望对方……
+                      </label>
+                      <Select
+                        value={matchPreference}
+                        onValueChange={value => handleMatchPreference(q.id, value as MatchPreference)}
+                        disabled={preferenceDisabled}
+                      >
+                        <SelectTrigger
+                          className="h-11 rounded-xl bg-card"
+                          aria-labelledby={`match-preference-label-${q.id}`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="any">无所谓</SelectItem>
+                          <SelectItem value="same">跟我偏向同一边</SelectItem>
+                          <SelectItem value="different">跟我偏向不同边</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      {answer === undefined && (
+                        <p className="mt-2 text-xs text-muted-foreground">请先完成上方的本人选择。</p>
+                      )}
+                      {answer === 4 && (
+                        <p className="mt-2 text-xs text-muted-foreground">中间值不设置左右匹配限制。</p>
+                      )}
+                      {isHardFilter && (
+                        <p className="mt-2 text-xs leading-relaxed text-[#B45309]">
+                          此选项为硬性筛选条件，多多包容会大大增加匹配率哟~
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <SpectrumSlider
-                    value={answers[q.id] ?? 0}
-                    onChange={v => handleAnswer(q.id, v)}
-                    leftLabel={q.left}
-                    rightLabel={q.right}
-                  />
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {unansweredWarning && (
