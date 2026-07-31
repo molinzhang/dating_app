@@ -83,6 +83,7 @@ def serialize_questionnaire(q):
         "id": str(q["id"]),
         "version": q["version"],
         "answers": q["answers"],
+        "matchPreferences": q["match_preferences"],
         "importantQuestionIds": q["important_question_ids"],
         "startedAt": q["started_at"],
         "completedAt": q["completed_at"],
@@ -159,6 +160,7 @@ def maybe_regenerate_weekly_matches():
                 "id": u["id"],
                 "gender": u["gender"],
                 "answers": q["answers"],
+                "match_preferences": q["match_preferences"],
                 "important_question_ids": q["important_question_ids"],
             })
     if len(eligible) < 2:
@@ -352,13 +354,38 @@ def get_photo(user_id: int):
 
 # ========================================================== questionnaire ==
 
+MatchPreferenceValue = Literal["any", "same", "different"]
+
+
 class SaveAnswersBody(BaseModel):
     answers: dict[int, int]
+    matchPreferences: dict[int, MatchPreferenceValue] = {}
     currentSection: int
 
 
 class SubmitBody(BaseModel):
     importantQuestionIds: list[int]
+    matchPreferences: dict[int, MatchPreferenceValue] = {}
+
+
+def normalize_match_preferences(preferences, answers):
+    """Keep only meaningful constraints.
+
+    A question the user answered neutrally (4) can't express "same side as me",
+    so it's stored as "any" rather than being enforced later — this is also why
+    the value is normalized on write instead of at match time, so what's stored
+    is what actually gets applied. Unknown question ids are dropped.
+    """
+    normalized = {}
+    for qid, preference in (preferences or {}).items():
+        if qid not in ALL_QUESTION_IDS:
+            continue
+        answer = (answers or {}).get(qid)
+        if preference in ("same", "different") and answer is not None and answer != matching.NEUTRAL_ANSWER:
+            normalized[qid] = preference
+        else:
+            normalized[qid] = "any"
+    return normalized
 
 
 def _start_new_draft(user_id):
@@ -379,7 +406,9 @@ def save_answers(body: SaveAnswersBody, user=Depends(get_current_user)):
     draft = db.get_draft_response(user["id"])
     if draft is None:
         draft = _start_new_draft(user["id"])
-    db.save_draft_answers(draft["id"], body.answers, body.currentSection)
+    merged_answers = {**draft["answers"], **body.answers}
+    preferences = normalize_match_preferences(body.matchPreferences, merged_answers)
+    db.save_draft_answers(draft["id"], body.answers, body.currentSection, preferences)
     return serialize_questionnaire(db.get_response_by_id(draft["id"]))
 
 
@@ -394,7 +423,12 @@ def submit_questionnaire(body: SubmitBody, user=Depends(get_current_user)):
     if not (3 <= len(body.importantQuestionIds) <= 5):
         raise HTTPException(status_code=400, detail="请选择 3-5 个最重要的维度")
 
-    db.submit_response(draft["id"], body.importantQuestionIds)
+    # Submit carries the authoritative preferences; fall back to the draft's
+    # stored values if the client omitted them.
+    preferences = normalize_match_preferences(
+        body.matchPreferences or draft["match_preferences"], draft["answers"]
+    )
+    db.submit_response(draft["id"], body.importantQuestionIds, preferences)
     maybe_regenerate_weekly_matches()
     return serialize_questionnaire(db.get_response_by_id(draft["id"]))
 

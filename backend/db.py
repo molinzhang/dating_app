@@ -115,6 +115,7 @@ def init_db():
             user_id INTEGER NOT NULL REFERENCES users(id),
             version INTEGER NOT NULL,
             answers TEXT NOT NULL,
+            match_preferences TEXT NOT NULL DEFAULT '{}',
             important_question_ids TEXT NOT NULL DEFAULT '[]',
             current_section INTEGER NOT NULL DEFAULT 1,
             started_at TEXT NOT NULL,
@@ -172,6 +173,9 @@ def init_db():
             data BYTEA NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        ALTER TABLE questionnaire_responses
+            ADD COLUMN IF NOT EXISTS match_preferences TEXT NOT NULL DEFAULT '{}';
 
         CREATE INDEX IF NOT EXISTS idx_responses_user_status
             ON questionnaire_responses(user_id, status);
@@ -235,6 +239,7 @@ def _row_to_questionnaire(row):
         return None
     d = dict(row)
     d["answers"] = {int(k): v for k, v in json.loads(d["answers"]).items()}
+    d["match_preferences"] = {int(k): v for k, v in json.loads(d.get("match_preferences") or "{}").items()}
     d["important_question_ids"] = json.loads(d["important_question_ids"])
     return d
 
@@ -284,14 +289,16 @@ def get_archived_responses(user_id):
     return [_row_to_questionnaire(r) for r in rows]
 
 
-def create_draft(user_id, version, answers=None, current_section=1):
+def create_draft(user_id, version, answers=None, current_section=1, match_preferences=None):
     with _cursor(commit=True) as cur:
         cur.execute(
-            """INSERT INTO questionnaire_responses (user_id, version, answers, important_question_ids,
-                                                      current_section, started_at, status)
-               VALUES (%s, %s, %s, '[]', %s, %s, 'draft')
+            """INSERT INTO questionnaire_responses (user_id, version, answers, match_preferences,
+                                                      important_question_ids, current_section, started_at, status)
+               VALUES (%s, %s, %s, %s, '[]', %s, %s, 'draft')
                RETURNING id""",
-            (user_id, version, json.dumps(answers or {}), current_section, now_iso()),
+            (user_id, version, json.dumps(answers or {}),
+             json.dumps({str(k): v for k, v in (match_preferences or {}).items()}),
+             current_section, now_iso()),
         )
         draft_id = cur.fetchone()["id"]
     return get_response_by_id(draft_id)
@@ -304,8 +311,8 @@ def get_response_by_id(response_id):
     return _row_to_questionnaire(row)
 
 
-def save_draft_answers(response_id, answers, current_section):
-    """Merge the incoming answers into whatever is already stored.
+def save_draft_answers(response_id, answers, current_section, match_preferences=None):
+    """Merge the incoming answers and per-question preferences into what's stored.
 
     Done as a single jsonb merge rather than read-modify-write in Python: one
     round trip instead of two, and no lost update if two autosaves overlap.
@@ -314,19 +321,27 @@ def save_draft_answers(response_id, answers, current_section):
         cur.execute(
             """UPDATE questionnaire_responses
                SET answers = (answers::jsonb || %s::jsonb)::text,
+                   match_preferences = (match_preferences::jsonb || %s::jsonb)::text,
                    current_section = %s
                WHERE id = %s""",
-            (json.dumps({str(k): v for k, v in answers.items()}), current_section, response_id),
+            (json.dumps({str(k): v for k, v in answers.items()}),
+             json.dumps({str(k): v for k, v in (match_preferences or {}).items()}),
+             current_section, response_id),
         )
 
 
-def submit_response(response_id, important_question_ids):
+def submit_response(response_id, important_question_ids, match_preferences=None):
+    """Submit replaces match_preferences outright (rather than merging) so the
+    final payload wins over a debounced autosave that may still be in flight."""
     with _cursor(commit=True) as cur:
         cur.execute(
             """UPDATE questionnaire_responses
-               SET status = 'current', important_question_ids = %s, completed_at = %s
+               SET status = 'current', important_question_ids = %s,
+                   match_preferences = %s, completed_at = %s
                WHERE id = %s""",
-            (json.dumps(important_question_ids), now_iso(), response_id),
+            (json.dumps(important_question_ids),
+             json.dumps({str(k): v for k, v in (match_preferences or {}).items()}),
+             now_iso(), response_id),
         )
 
 

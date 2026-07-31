@@ -81,21 +81,72 @@ def build_exclusions(dislike_pairs):
     return exclusions
 
 
+NEUTRAL_ANSWER = 4
+
+
+def _side(value):
+    """Which end of the spectrum an answer sits on. Direction only, not degree."""
+    if value is None:
+        return None
+    if value < NEUTRAL_ANSWER:
+        return "left"
+    if value > NEUTRAL_ANSWER:
+        return "right"
+    return "neutral"
+
+
+def accepts(viewer_answers, viewer_preferences, other_answers):
+    """Whether every explicit per-question preference of the viewer's is
+    satisfied by the other person.
+
+    A preference is a hard filter, not a weight: "same" requires the other
+    person to sit on the viewer's side of that question, "different" the
+    opposite side. A neutral (4) answer is on neither side, so it satisfies
+    neither — but a viewer who is themselves neutral imposes no constraint,
+    since "same side as neutral" has no meaning.
+    """
+    for qid, preference in (viewer_preferences or {}).items():
+        if preference not in ("same", "different"):
+            continue
+        viewer_side = _side(viewer_answers.get(qid))
+        if viewer_side in (None, "neutral"):
+            continue
+        other_side = _side(other_answers.get(qid))
+        if other_side in (None, "neutral"):
+            return False
+        if preference == "same" and other_side != viewer_side:
+            return False
+        if preference == "different" and other_side == viewer_side:
+            return False
+    return True
+
+
+def mutually_acceptable(user_a, user_b):
+    """Both sides' hard filters must pass — a pair survives only if each
+    accepts the other."""
+    return (
+        accepts(user_a["answers"], user_a.get("match_preferences"), user_b["answers"])
+        and accepts(user_b["answers"], user_b.get("match_preferences"), user_a["answers"])
+    )
+
+
 def _preference_order(viewer, candidates, exclusions):
     """Rank candidates for viewer, most-preferred first, dropping anyone either
-    side has permanently excluded.
+    side has permanently excluded or whose per-question hard filters fail.
 
     Dropping candidates makes these "incomplete preference lists". Gale-Shapley
     still terminates (the proposal budget only shrinks) and the result is still
     stable under the standard adjusted definition: a blocking pair requires both
     people to find each other *acceptable*, and excluded pairs are by definition
-    unacceptable, so they can never block.
+    unacceptable, so they can never block. The per-question filter is applied
+    symmetrically via mutually_acceptable, so both sides' lists agree on who is
+    acceptable — a one-sided filter would break that guarantee.
     """
     blocked = exclusions.get(viewer["id"], frozenset())
     scored = [
         (_directional_score(viewer["answers"], viewer["important_question_ids"], c["answers"]), c["id"])
         for c in candidates
-        if c["id"] not in blocked
+        if c["id"] not in blocked and mutually_acceptable(viewer, c)
     ]
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [uid for _, uid in scored]
