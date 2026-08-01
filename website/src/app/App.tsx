@@ -20,7 +20,12 @@ type Route =
   | "/questionnaire" | "/questionnaire/complete"
   | "/results" | "/results/archive" | "/matches/current";
 
-type MatchPreference = "any" | "same" | "different";
+type MatchPreference =
+  | "any"
+  | "same"
+  | "same_or_neutral"
+  | "different"
+  | "different_or_neutral";
 
 interface AppUser {
   id: string; displayName: string; email: string; gender: "男" | "女";
@@ -97,6 +102,10 @@ const QUESTIONS = [
   { id:24, topic:"坚持与止损", left:"关系遇到长期困难时，应尽最大努力磨合和修复", right:"如果核心需求长期无法满足，及时结束也很负责" },
 ];
 
+const SIDE_PREFERENCES: MatchPreference[] = [
+  "same", "same_or_neutral", "different", "different_or_neutral",
+];
+
 function normalizeMatchPreferences(
   preferences?: Partial<Record<number, MatchPreference>> | null,
   answers?: Record<number, number> | null,
@@ -104,7 +113,7 @@ function normalizeMatchPreferences(
   return Object.fromEntries(QUESTIONS.map(({ id }) => {
     if (answers && (answers[id] === undefined || answers[id] === 4)) return [id, "any"];
     const preference = preferences?.[id];
-    return [id, preference === "same" || preference === "different" ? preference : "any"];
+    return [id, preference && SIDE_PREFERENCES.includes(preference) ? preference : "any"];
   })) as Record<number, MatchPreference>;
 }
 
@@ -1685,8 +1694,10 @@ function QuestionnairePage() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="any">无所谓</SelectItem>
-                          <SelectItem value="same">跟我偏向同一边</SelectItem>
-                          <SelectItem value="different">跟我偏向不同边</SelectItem>
+                          <SelectItem value="same_or_neutral">偏向同一边（可接受中立）</SelectItem>
+                          <SelectItem value="same">必须同一边</SelectItem>
+                          <SelectItem value="different_or_neutral">偏向不同边（可接受中立）</SelectItem>
+                          <SelectItem value="different">必须不同边</SelectItem>
                         </SelectContent>
                       </Select>
                       {answer === undefined && (

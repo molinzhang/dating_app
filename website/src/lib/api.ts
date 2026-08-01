@@ -1,7 +1,12 @@
 const API_BASE_URL = (import.meta as any).env?.VITE_API_BASE_URL || "http://localhost:8000";
 const TOKEN_KEY = "cg_token";
 
-type MatchPreference = "any" | "same" | "different";
+type MatchPreference =
+  | "any"
+  | "same"
+  | "same_or_neutral"
+  | "different"
+  | "different_or_neutral";
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);

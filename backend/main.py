@@ -354,7 +354,9 @@ def get_photo(user_id: int):
 
 # ========================================================== questionnaire ==
 
-MatchPreferenceValue = Literal["any", "same", "different"]
+MatchPreferenceValue = Literal[
+    "any", "same", "same_or_neutral", "different", "different_or_neutral"
+]
 
 
 class SaveAnswersBody(BaseModel):
@@ -381,7 +383,7 @@ def normalize_match_preferences(preferences, answers):
         if qid not in ALL_QUESTION_IDS:
             continue
         answer = (answers or {}).get(qid)
-        if preference in ("same", "different") and answer is not None and answer != matching.NEUTRAL_ANSWER:
+        if preference in matching.SIDE_PREFERENCES and answer is not None and answer != matching.NEUTRAL_ANSWER:
             normalized[qid] = preference
         else:
             normalized[qid] = "any"

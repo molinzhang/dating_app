@@ -83,6 +83,19 @@ def build_exclusions(dislike_pairs):
 
 NEUTRAL_ANSWER = 4
 
+# Each side-preference comes in a strict form and a lenient one that also
+# accepts a neutral (4) answer from the other person. Strict constraints
+# compound hard — every one roughly halves the candidate pool, and both people's
+# constraints must hold — so the lenient form is what makes "I lean this way but
+# I'm not fussy" expressible without gutting someone's chances.
+SIDE_PREFERENCES = {
+    "same": ("same", False),
+    "same_or_neutral": ("same", True),
+    "different": ("different", False),
+    "different_or_neutral": ("different", True),
+}
+MATCH_PREFERENCE_VALUES = ("any", *SIDE_PREFERENCES)
+
 
 def _side(value):
     """Which end of the spectrum an answer sits on. Direction only, not degree."""
@@ -99,24 +112,29 @@ def accepts(viewer_answers, viewer_preferences, other_answers):
     """Whether every explicit per-question preference of the viewer's is
     satisfied by the other person.
 
-    A preference is a hard filter, not a weight: "same" requires the other
-    person to sit on the viewer's side of that question, "different" the
-    opposite side. A neutral (4) answer is on neither side, so it satisfies
-    neither — but a viewer who is themselves neutral imposes no constraint,
-    since "same side as neutral" has no meaning.
+    A preference is a hard filter, not a weight. A neutral (4) answer sits on
+    neither side, so it fails a strict constraint but passes a lenient one. A
+    viewer who is themselves neutral imposes no constraint either way, since
+    "same side as neutral" has no meaning.
     """
     for qid, preference in (viewer_preferences or {}).items():
-        if preference not in ("same", "different"):
-            continue
+        rule = SIDE_PREFERENCES.get(preference)
+        if rule is None:
+            continue  # "any", or anything unrecognized
+        direction, allow_neutral = rule
         viewer_side = _side(viewer_answers.get(qid))
         if viewer_side in (None, "neutral"):
             continue
         other_side = _side(other_answers.get(qid))
-        if other_side in (None, "neutral"):
+        if other_side is None:
             return False
-        if preference == "same" and other_side != viewer_side:
+        if other_side == "neutral":
+            if not allow_neutral:
+                return False
+            continue
+        if direction == "same" and other_side != viewer_side:
             return False
-        if preference == "different" and other_side == viewer_side:
+        if direction == "different" and other_side == viewer_side:
             return False
     return True
 
