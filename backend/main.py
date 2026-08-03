@@ -138,11 +138,43 @@ def get_current_user(authorization: Optional[str] = Header(None)):
 
 # ===================================================== weekly match cycle ==
 
+def _needs_repair(eligible_ids, responses, cycle):
+    """Whether the pool has to be re-paired against the given cycle."""
+    if cycle is None:
+        return True
+    if not eligible_ids <= db.get_cycle_participants(cycle["id"]):
+        return True  # somebody new became eligible
+    # Everyone is accounted for, but a retake since the cycle was generated has
+    # to re-run pairing or the new answers/preferences silently do nothing.
+    newest = max(
+        (responses[uid]["completed_at"] for uid in eligible_ids if responses[uid].get("completed_at")),
+        default=None,
+    )
+    return newest is not None and newest > cycle["generated_at"]
+
+
+def _collect_eligible():
+    active_users = db.list_users_by_status("active")
+    responses = db.get_current_responses_for([u["id"] for u in active_users])
+    eligible = [
+        {
+            "id": u["id"],
+            "gender": u["gender"],
+            "answers": responses[u["id"]]["answers"],
+            "match_preferences": responses[u["id"]]["match_preferences"],
+            "important_question_ids": responses[u["id"]]["important_question_ids"],
+        }
+        for u in active_users
+        if responses.get(u["id"])
+    ]
+    return eligible, responses
+
+
 def maybe_regenerate_weekly_matches():
-    """Lazy weekly refresh: when the current pairing cycle has expired (or a
-    newly-eligible user isn't part of it), re-run matching for the WHOLE
-    eligible pool at once and open a new cycle. The pool therefore converges
-    onto one shared weekly cadence rather than per-user 7-day timers.
+    """Lazy weekly refresh: re-pair the WHOLE eligible pool when the cycle has
+    expired, someone new became eligible, or someone retook the questionnaire.
+    The pool therefore converges onto one shared weekly cadence rather than
+    per-user 7-day timers.
 
     Runs on nearly every request, so reads are batched — doing them per-user
     turned a single login into ~29 round trips to a remote DB.
@@ -150,50 +182,50 @@ def maybe_regenerate_weekly_matches():
     now = datetime.now(timezone.utc)
     now_str = now.isoformat()
 
-    active_users = db.list_users_by_status("active")
-    responses = db.get_current_responses_for([u["id"] for u in active_users])
-    eligible = []
-    for u in active_users:
-        q = responses.get(u["id"])
-        if q:
-            eligible.append({
-                "id": u["id"],
-                "gender": u["gender"],
-                "answers": q["answers"],
-                "match_preferences": q["match_preferences"],
-                "important_question_ids": q["important_question_ids"],
-            })
+    eligible, responses = _collect_eligible()
     if len(eligible) < 2:
         return
-
-    # Track cycles explicitly rather than inferring from weekly_matches rows:
-    # unmatched users never get a row, so "is anyone missing a match?" was
-    # always true and re-paired the entire pool on every single request.
     eligible_ids = {u["id"] for u in eligible}
-    cycle = db.get_active_cycle(now_str)
-    if cycle is not None and eligible_ids <= db.get_cycle_participants(cycle["id"]):
-        # Everyone is already accounted for, but someone may have retaken the
-        # questionnaire since — new answers or per-question preferences have to
-        # re-run the pairing, or the change silently has no effect until the
-        # cycle expires.
-        newest_submission = max(
-            (responses[uid]["completed_at"] for uid in eligible_ids if responses[uid].get("completed_at")),
-            default=None,
-        )
-        if newest_submission is None or newest_submission <= cycle["generated_at"]:
+    if not _needs_repair(eligible_ids, responses, db.get_active_cycle(now_str)):
+        return  # cheap check before reaching for the lock
+
+    with db.try_pairing_lock() as acquired:
+        if not acquired:
+            return  # another request is already pairing; nothing to add
+        # Re-read under the lock: the holder may have just finished, and
+        # re-pairing on their result would duplicate the whole cycle.
+        eligible, responses = _collect_eligible()
+        if len(eligible) < 2:
+            return
+        eligible_ids = {u["id"] for u in eligible}
+        cycle = db.get_active_cycle(now_str)
+        if not _needs_repair(eligible_ids, responses, cycle):
             return
 
-    assignments = matching.gale_shapley_matching(eligible, matching.build_exclusions(db.get_dislike_pairs()))
-    next_refresh_date = matching.next_refresh_from(now).isoformat()
-    answers_by_id = {u["id"]: u["answers"] for u in eligible}
+        assignments = matching.gale_shapley_matching(
+            eligible, matching.build_exclusions(db.get_dislike_pairs())
+        )
+        # A mid-cycle re-pair keeps the current week's deadline. Starting a
+        # fresh 7 days would let frequent retakes push everyone's refresh date
+        # out indefinitely.
+        next_refresh_date = (
+            cycle["next_refresh_date"] if cycle is not None
+            else matching.next_refresh_from(now).isoformat()
+        )
+        answers_by_id = {u["id"]: u["answers"] for u in eligible}
+        # Carry over what people already did with a recommendation that
+        # survives the re-pair, so a skip isn't quietly undone.
+        previous = db.get_current_response_statuses()
 
-    rows = []
-    for a_id, b_id, _score in assignments:
-        comparisons_a, summary_a = matching.build_match_payload(answers_by_id[a_id], answers_by_id[b_id])
-        rows.append((a_id, b_id, summary_a, comparisons_a, now_str, next_refresh_date))
-        comparisons_b, summary_b = matching.build_match_payload(answers_by_id[b_id], answers_by_id[a_id])
-        rows.append((b_id, a_id, summary_b, comparisons_b, now_str, next_refresh_date))
-    db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
+        rows = []
+        for a_id, b_id, _score in assignments:
+            comparisons_a, summary_a = matching.build_match_payload(answers_by_id[a_id], answers_by_id[b_id])
+            rows.append((a_id, b_id, summary_a, comparisons_a, now_str, next_refresh_date,
+                         previous.get((a_id, b_id), "unseen")))
+            comparisons_b, summary_b = matching.build_match_payload(answers_by_id[b_id], answers_by_id[a_id])
+            rows.append((b_id, a_id, summary_b, comparisons_b, now_str, next_refresh_date,
+                         previous.get((b_id, a_id), "unseen")))
+        db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
 
 
 def get_fresh_match_for(user_id):

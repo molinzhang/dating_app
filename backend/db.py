@@ -32,8 +32,10 @@ _pool = None
 def _get_pool():
     global _pool
     if _pool is None:
+        # Sized for concurrent requests each running ~13 queries; 8 was tight
+        # enough to exhaust under a burst.
         _pool = pg_pool.ThreadedConnectionPool(
-            1, 8, DATABASE_URL, cursor_factory=RealDictCursor
+            1, 16, DATABASE_URL, cursor_factory=RealDictCursor
         )
     return _pool
 
@@ -78,6 +80,37 @@ def _transaction():
     finally:
         conn.autocommit = True
         pool.putconn(conn)
+
+
+# Arbitrary constant identifying the pairing lock; any fixed value works as
+# long as nothing else in this database uses the same key.
+PAIRING_LOCK_KEY = 918273645
+
+
+@contextmanager
+def try_pairing_lock():
+    """Serialize pairing runs. Yields True if this caller holds the lock.
+
+    Pairing is read-decide-write with no isolation, so concurrent requests all
+    passed the "needs refresh?" check and each wrote a full set of rows —
+    6 simultaneous requests produced 5 cycles and 5x the match rows. Callers
+    that don't get the lock should skip: another request is already doing it,
+    and queueing would only redo identical work.
+    """
+    # Deliberately NOT a pooled connection: the lock is held for the whole
+    # pairing run, and the work inside needs pooled connections of its own.
+    # Borrowing one here starved the pool and raised "connection pool
+    # exhausted" under concurrent load.
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    acquired = False
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s) AS ok", (PAIRING_LOCK_KEY,))
+            acquired = bool(cur.fetchone()["ok"])
+        yield acquired
+    finally:
+        conn.close()  # closing releases the advisory lock with the session
 
 
 def get_connection():
@@ -462,9 +495,25 @@ def get_cycle_participants(cycle_id):
         return {r["user_id"] for r in cur.fetchall()}
 
 
+def get_current_response_statuses():
+    """Latest response_status per (user, matched_user), so a re-pair can carry
+    over what someone already did with an unchanged recommendation."""
+    with _cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (user_id, matched_user_id)
+                      user_id, matched_user_id, response_status
+               FROM weekly_matches
+               ORDER BY user_id, matched_user_id, id DESC"""
+        )
+        return {(r["user_id"], r["matched_user_id"]): r["response_status"] for r in cur.fetchall()}
+
+
 def record_match_cycle(generated_at, next_refresh_date, participant_ids, match_rows):
     """Persist a whole pairing run atomically: the cycle, everyone who took
-    part (matched or not), and the resulting match rows."""
+    part (matched or not), and the resulting match rows.
+
+    match_rows carry their own response_status so a mid-cycle re-pair doesn't
+    resurrect a recommendation the user already skipped."""
     with _transaction() as cur:
         cur.execute(
             "INSERT INTO match_cycles (generated_at, next_refresh_date) VALUES (%s, %s) RETURNING id",
@@ -484,7 +533,7 @@ def record_match_cycle(generated_at, next_refresh_date, participant_ids, match_r
                 """INSERT INTO weekly_matches (user_id, matched_user_id, compatibility_summary,
                                                 dimension_comparisons, recommendation_date, next_refresh_date, response_status)
                    VALUES %s""",
-                [(u, m, s, json.dumps(c), rd, nrd, "unseen") for u, m, s, c, rd, nrd in rows],
+                [(u, m, s, json.dumps(c), rd, nrd, st) for u, m, s, c, rd, nrd, st in rows],
             )
         return cycle_id
 
