@@ -172,7 +172,16 @@ def maybe_regenerate_weekly_matches():
     eligible_ids = {u["id"] for u in eligible}
     cycle = db.get_active_cycle(now_str)
     if cycle is not None and eligible_ids <= db.get_cycle_participants(cycle["id"]):
-        return
+        # Everyone is already accounted for, but someone may have retaken the
+        # questionnaire since — new answers or per-question preferences have to
+        # re-run the pairing, or the change silently has no effect until the
+        # cycle expires.
+        newest_submission = max(
+            (responses[uid]["completed_at"] for uid in eligible_ids if responses[uid].get("completed_at")),
+            default=None,
+        )
+        if newest_submission is None or newest_submission <= cycle["generated_at"]:
+            return
 
     assignments = matching.gale_shapley_matching(eligible, matching.build_exclusions(db.get_dislike_pairs()))
     next_refresh_date = matching.next_refresh_from(now).isoformat()
