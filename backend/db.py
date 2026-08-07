@@ -495,6 +495,19 @@ def get_cycle_participants(cycle_id):
         return {r["user_id"] for r in cur.fetchall()}
 
 
+def get_partner_response_status(user_id, partner_id):
+    """The partner's own status toward this user, for their side of the pair."""
+    with _cursor() as cur:
+        cur.execute(
+            """SELECT response_status FROM weekly_matches
+               WHERE user_id = %s AND matched_user_id = %s
+               ORDER BY id DESC LIMIT 1""",
+            (partner_id, user_id),
+        )
+        row = cur.fetchone()
+    return row["response_status"] if row else None
+
+
 def get_current_response_statuses():
     """Latest response_status per (user, matched_user), so a re-pair can carry
     over what someone already did with an unchanged recommendation."""

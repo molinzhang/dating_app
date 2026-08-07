@@ -61,6 +61,9 @@ interface WeeklyMatch {
   }>;
   recommendationDate: string; nextRefreshDate: string;
   responseStatus: "unseen" | "viewed" | "interested" | "skipped";
+  // Coarse view of the other person's response. A skip is reported as "seen",
+  // never disclosed as a rejection.
+  partnerSignal?: "interested" | "seen" | "unseen";
 }
 
 // ============================================================
@@ -2139,6 +2142,7 @@ function MatchDetailPage() {
   }
 
   const m = weeklyMatch;
+  const isInterested = m.responseStatus === "interested";
   const closeCount = m.dimensionComparisons.filter(d => d.category === "close").length;
   const complementCount = m.dimensionComparisons.filter(d => d.category === "complementary").length;
   const discussCount = m.dimensionComparisons.filter(d => d.category === "discuss").length;
@@ -2304,10 +2308,28 @@ function MatchDetailPage() {
         </div>
       </div>
 
+      {/* Mutual interest */}
+      {isInterested && m.partnerSignal === "interested" && (
+        <div className="mb-4 rounded-2xl border border-[#059669]/30 bg-[#059669]/5 p-5 flex items-start gap-3">
+          <Heart size={20} className="text-[#059669] mt-0.5 shrink-0"/>
+          <div>
+            <p className="font-semibold text-[#059669] mb-0.5">你们互相感兴趣了！</p>
+            <p className="text-sm text-muted-foreground">
+              {m.matchedUser.displayName} 也对你表达了兴趣。主动一点，先打个招呼吧。
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Actions */}
-      <div className="flex flex-wrap gap-3 mb-4">
-        <Btn onClick={() => { updateMatchResponse("interested"); toast.success("已标记为感兴趣！"); }}>
-          <Heart size={16}/>我感兴趣
+      <div className="flex flex-wrap gap-3 mb-2">
+        <Btn
+          variant={isInterested ? "secondary" : "primary"}
+          onClick={() => { if (!isInterested) { updateMatchResponse("interested"); toast.success("已标记为感兴趣！"); } }}
+          disabled={isInterested}
+          className={isInterested ? "border-[#059669]/40 text-[#059669]" : ""}
+        >
+          {isInterested ? <><Check size={16}/>已表达感兴趣</> : <><Heart size={16}/>我感兴趣</>}
         </Btn>
         <Btn variant="secondary" onClick={() => { updateMatchResponse("skipped"); toast("已跳过本周推荐，下周会为你重新匹配。"); navigate("/dashboard"); }}>
           <SkipForward size={16}/>暂时跳过
@@ -2316,6 +2338,14 @@ function MatchDetailPage() {
           <Flag size={14}/>举报或屏蔽
         </Btn>
       </div>
+
+      {isInterested && m.partnerSignal !== "interested" && (
+        <p className="text-sm text-muted-foreground mb-4">
+          {m.partnerSignal === "seen"
+            ? `${m.matchedUser.displayName} 已经看过你的资料，还没有回应。`
+            : `${m.matchedUser.displayName} 还没有查看本周推荐。`}
+        </p>
+      )}
 
       <p className="text-xs text-muted-foreground text-center">
         下一次推荐将在 {m.nextRefreshDate} 更新

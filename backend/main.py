@@ -92,6 +92,21 @@ def serialize_questionnaire(q):
     }
 
 
+def _partner_signal(user_id, partner_id):
+    """What to tell the user about the other person's response.
+
+    Deliberately coarse: "interested" and "pending" only. A skip is reported as
+    pending rather than disclosed — telling someone they were passed on is
+    needlessly unkind, and it leaks a choice the other person made privately.
+    """
+    status = db.get_partner_response_status(user_id, partner_id)
+    if status == "interested":
+        return "interested"
+    if status in ("viewed", "skipped"):
+        return "seen"
+    return "unseen"
+
+
 def serialize_weekly_match(match_row):
     matched_id = match_row["matched_user_id"]
     matched_user = db.get_user_by_id(matched_id)
@@ -113,6 +128,7 @@ def serialize_weekly_match(match_row):
     return {
         "id": str(match_row["id"]),
         "matchedUser": matched,
+        "partnerSignal": _partner_signal(match_row["user_id"], matched_id),
         "compatibilitySummary": match_row["compatibility_summary"],
         "dimensionComparisons": json.loads(match_row["dimension_comparisons"]),
         "recommendationDate": match_row["recommendation_date"][:10],
