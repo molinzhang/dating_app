@@ -6,19 +6,21 @@ import {
   Heart, RotateCcw, Info, BadgeCheck, Zap, Shield, BookOpen, Camera, Pencil
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
+import { Navigate, useLocation, useNavigate } from "react-router";
 import { api, ApiError, getToken, setToken, resolvePhotoUrl } from "../lib/api";
+import exampleBoyPhoto from "../../example_boy.webp";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "./components/ui/select";
+
+const V2Experience = React.lazy(() => import("../features/v2/V2Experience").then(module => ({ default: module.V2Experience })));
+const GuestEventPreview = React.lazy(() => import("../features/v2/GuestEventPreview").then(module => ({ default: module.GuestEventPreview })));
 
 // ============================================================
 // TYPES
 // ============================================================
 
-type Route =
-  | "/" | "/register" | "/login" | "/dashboard"
-  | "/questionnaire" | "/questionnaire/complete"
-  | "/results" | "/results/archive" | "/matches/current";
+type Route = string;
 
 type MatchPreference =
   | "any"
@@ -37,6 +39,19 @@ interface AppUser {
   bio?: string;
   matchPreference?: string;
 }
+
+const V2_DEMO_MODE = (import.meta as any).env?.VITE_DATING_SERVICE_MODE !== "api";
+const V2_DEMO_SESSION_KEY = "cg_v2_demo_session";
+const V2_DEMO_USER: AppUser = {
+  id: "user-lin-zhixia",
+  displayName: "林知夏",
+  email: "demo@commonground.local",
+  gender: "女",
+  status: "active",
+  questionnaireStatus: "completed",
+  createdAt: "2025-08-11T12:00:00.000Z",
+  bio: "喜欢城市散步、独立书店和认真但不紧绷的对话。",
+};
 
 interface QuestionnaireResponse {
   id: string; version: number;
@@ -159,6 +174,7 @@ interface AppCtx {
   matchState: MatchState | null;
   booting: boolean;
   navigate: (r: Route) => void;
+  enterDemo: (destination?: Route) => void;
   login: (email: string, pw: string) => Promise<string | null>;
   register: (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => Promise<string | null>;
   logout: () => void;
@@ -176,7 +192,9 @@ const Ctx = createContext<AppCtx>(null!);
 const useApp = () => useContext(Ctx);
 
 function AppProvider({ children }: { children: React.ReactNode }) {
-  const [route, setRoute] = useState<Route>("/");
+  const location = useLocation();
+  const routerNavigate = useNavigate();
+  const route = location.pathname;
   const [user, setUser] = useState<AppUser | null>(null);
   const [questionnaire, setQuestionnaire] = useState<QuestionnaireResponse | null>(null);
   const [archivedQuestionnaires, setArchived] = useState<QuestionnaireResponse[]>([]);
@@ -194,6 +212,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   const clearSession = useCallback(() => {
     setToken(null);
+    localStorage.removeItem(V2_DEMO_SESSION_KEY);
     setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null); setMatchState(null);
   }, []);
 
@@ -207,23 +226,48 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Restore session from a stored token on first load.
   useEffect(() => {
-    if (!getToken()) { setBooting(false); return; }
+    if (!getToken()) {
+      if (V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1") {
+        setUser({ ...V2_DEMO_USER });
+      }
+      setBooting(false);
+      return;
+    }
     refreshMe().finally(() => setBooting(false));
   }, [refreshMe]);
 
   const navigate = useCallback((r: Route) => {
-    const protected_routes: Route[] = ["/dashboard","/questionnaire","/questionnaire/complete","/results","/results/archive","/matches/current"];
-    if (protected_routes.includes(r) && !user) { setRoute("/login"); return; }
-    setRoute(r);
+    const protectedRoutes = ["/dashboard", "/home", "/profile", "/matches", "/questionnaire", "/questionnaire/complete", "/results", "/results/archive", "/matches/current"];
+    if (protectedRoutes.some(path => r === path || r.startsWith(`${path}/`)) && !user) {
+      routerNavigate("/login");
+      return;
+    }
+    routerNavigate(r);
     window.scrollTo(0,0);
-  }, [user]);
+  }, [routerNavigate, user]);
+
+  const enterDemo = useCallback((destination?: Route) => {
+    if (!V2_DEMO_MODE) return;
+    setToken(null);
+    localStorage.setItem(V2_DEMO_SESSION_KEY, "1");
+    setUser({ ...V2_DEMO_USER });
+    setQuestionnaire(null);
+    setArchived([]);
+    setWeeklyMatch(null);
+    setMatchState(null);
+    const queryReturnTo = new URLSearchParams(location.search).get("returnTo");
+    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/home");
+    routerNavigate(nextRoute);
+  }, [location.search, routerNavigate]);
 
   const login = useCallback(async (email: string, password: string): Promise<string | null> => {
     try {
       const payload = await api.login({ email, password });
+      localStorage.removeItem(V2_DEMO_SESSION_KEY);
       setToken(payload.token);
       applyBootstrap(payload);
-      setRoute("/dashboard");
+      const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/home");
       return null;
     } catch (e) {
       // Distinguish wrong credentials from the server being unreachable —
@@ -232,27 +276,34 @@ function AppProvider({ children }: { children: React.ReactNode }) {
       if (e instanceof ApiError && e.status === 401) return "邮箱或密码不正确，请重试。";
       return e instanceof ApiError ? e.message : "登录失败，请稍后再试。";
     }
-  }, [applyBootstrap]);
+  }, [applyBootstrap, routerNavigate]);
 
   const register = useCallback(async (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }): Promise<string | null> => {
     try {
       const payload = await api.register(data);
+      localStorage.removeItem(V2_DEMO_SESSION_KEY);
       setToken(payload.token);
       applyBootstrap(payload);
-      setRoute("/dashboard");
+      const returnTo = new URLSearchParams(window.location.search).get("returnTo");
+      const suffix = returnTo?.startsWith("/events/") ? `&returnTo=${encodeURIComponent(returnTo)}` : "";
+      routerNavigate(`/profile?onboarding=1${suffix}`);
       return null;
     } catch (e) {
       return e instanceof ApiError ? e.message : "注册失败，请稍后再试";
     }
-  }, [applyBootstrap]);
+  }, [applyBootstrap, routerNavigate]);
 
   const logout = useCallback(() => {
-    api.logout().catch(() => {});
+    if (!(V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1")) api.logout().catch(() => {});
     clearSession();
-    setRoute("/");
-  }, [clearSession]);
+    routerNavigate("/");
+  }, [clearSession, routerNavigate]);
 
   const updateUser = useCallback(async (updates: Partial<AppUser>) => {
+    if (V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1") {
+      setUser(current => current ? { ...current, ...updates } : current);
+      return;
+    }
     const backendFields: { status?: string; bio?: string; matchPreference?: string } = {};
     if (updates.status !== undefined) backendFields.status = updates.status;
     if (updates.bio !== undefined) backendFields.bio = updates.bio;
@@ -308,21 +359,21 @@ function AppProvider({ children }: { children: React.ReactNode }) {
         matchPreferences: normalizeMatchPreferences(matchPreferences),
       });
       await refreshMe();
-      setRoute("/questionnaire/complete");
+      routerNavigate("/questionnaire/complete");
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : "提交失败，请稍后再试");
     }
-  }, [refreshMe]);
+  }, [refreshMe, routerNavigate]);
 
   const retakeQuestionnaire = useCallback(async () => {
     try {
       await api.retakeQuestionnaire();
       await refreshMe();
-      setRoute("/questionnaire");
+      routerNavigate("/questionnaire");
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : "操作失败，请稍后再试");
     }
-  }, [refreshMe]);
+  }, [refreshMe, routerNavigate]);
 
   const refreshMatch = useCallback(async () => {
     try {
@@ -355,7 +406,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={{
       route, user, questionnaire, archivedQuestionnaires, weeklyMatch, matchState, booting,
-      navigate, login, register, logout, updateUser, uploadPhoto,
+      navigate, enterDemo, login, register, logout, updateUser, uploadPhoto,
       saveAnswers, submitQuestionnaire, retakeQuestionnaire, refreshMatch,
       updateMatchResponse, dislikeMatch,
     }}>
@@ -480,10 +531,10 @@ function StatusToggle({ status, onToggle }: { status: "active" | "inactive"; onT
           ? "bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100"
           : "bg-muted border-border text-muted-foreground hover:bg-secondary"
       )}
-      aria-label="切换匹配状态"
+      aria-label="切换每周匹配状态"
     >
       <span className={cn("w-2 h-2 rounded-full", isActive ? "bg-emerald-500" : "bg-muted-foreground")}/>
-      {isActive ? "匹配已开启" : "匹配已暂停"}
+      {isActive ? "每周匹配已开启" : "每周匹配已暂停"}
     </button>
   );
 }
@@ -614,7 +665,9 @@ function Header() {
           <nav className="hidden md:flex items-center gap-1">
             {user ? (
               <>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>我的主页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/home")}>首页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/events")}>活动</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/profile")}>我的资料</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/results")}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <div className="relative ml-2">
@@ -667,7 +720,10 @@ function Header() {
                     <p className="text-xs text-muted-foreground">{user.email}</p>
                   </div>
                 </div>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/dashboard"); setMenuOpen(false); }}>我的主页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/home"); setMenuOpen(false); }}>首页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/matches"); setMenuOpen(false); }}>匹配</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/events"); setMenuOpen(false); }}>活动</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/profile"); setMenuOpen(false); }}>我的资料</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/results"); setMenuOpen(false); }}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <Btn variant="ghost" size="sm" onClick={logout} className="text-destructive justify-start">
@@ -685,9 +741,9 @@ function Header() {
         )}
       </header>
 
-      <Modal open={showStatusModal} onClose={() => setShowStatusModal(false)} title="暂停匹配">
+      <Modal open={showStatusModal} onClose={() => setShowStatusModal(false)} title="暂停每周匹配">
         <p className="text-muted-foreground text-sm leading-relaxed mb-6">
-          暂停后，你不会收到每周推荐、匹配邀请，也不会被推荐给其他用户。你的问卷和历史记录会保留。
+          暂停后，你不会收到每周推荐，也不会进入每周候选池。已经报名的活动不受影响；问卷和历史记录都会保留。
         </p>
         <div className="flex gap-3">
           <Btn variant="secondary" className="flex-1" onClick={() => setShowStatusModal(false)}>取消</Btn>
@@ -799,7 +855,7 @@ function ValueSpectrumViz({ userAnswers, matchAnswers, size = 320 }: {
 // ============================================================
 
 function LandingPage() {
-  const { navigate, user } = useApp();
+  const { navigate, user, enterDemo } = useApp();
   const DIMENSIONS_PREVIEW = ["探索与稳定","独立与联结","成就与生活","金钱与体验","公平与责任","信任与能动性","沟通与亲密"];
 
   // Send signed-in visitors to wherever they actually left off, rather than
@@ -807,12 +863,12 @@ function LandingPage() {
   const ctaRoute: Route = !user
     ? "/register"
     : user.questionnaireStatus === "completed"
-      ? "/dashboard"
+      ? "/home"
       : "/questionnaire";
   const ctaLabel = !user
     ? "完成问卷，开启匹配"
     : user.questionnaireStatus === "completed"
-      ? "查看我的本周推荐"
+      ? "进入匹配中心"
       : user.questionnaireStatus === "in_progress"
         ? "继续填写问卷"
         : "开始填写问卷";
@@ -827,14 +883,15 @@ function LandingPage() {
             比起猜你喜欢什么，我们更在意你如何看待生活。
           </h1>
           <p className="text-muted-foreground text-lg leading-relaxed mb-8">
-            完成一份关于个人价值观的问卷，生成你的价值画像。我们每周为你推荐一位认真筛选的真实匹配——不是算法，而是对话的起点。
+            用价值观问卷和双方都认可的必要条件，认真缩小彼此愿意认识的范围。你可以等待每周推荐，也可以借一场共同活动自然相遇。
           </p>
           {user ? (
-            <Btn size="lg" onClick={() => navigate("/dashboard")}>进入我的主页 <ArrowRight size={20}/></Btn>
+            <Btn size="lg" onClick={() => navigate("/home")}>进入我的主页 <ArrowRight size={20}/></Btn>
           ) : (
             <div className="flex flex-wrap gap-3">
               <Btn size="lg" onClick={() => navigate("/register")}>开始探索 <ArrowRight size={20}/></Btn>
               <Btn variant="secondary" size="lg" onClick={() => navigate("/login")}>登录</Btn>
+              {V2_DEMO_MODE ? <Btn variant="ghost" size="lg" onClick={() => enterDemo("/home")}>直接体验演示</Btn> : null}
             </div>
           )}
         </div>
@@ -909,6 +966,31 @@ function LandingPage() {
         </div>
       </section>
 
+      {/* Two ways to meet */}
+      <section className="bg-[#201B17] py-16 text-white">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="max-w-2xl mb-10">
+            <p className="text-sm font-medium text-orange-300 tracking-wide uppercase mb-3">两种相遇方式</p>
+            <h2 className="text-3xl font-bold mb-4" style={{ fontFamily:"'Noto Serif SC', serif" }}>认真等待，也可以主动创造一个场合</h2>
+            <p className="text-white/65 leading-relaxed">每周推荐适合稳定探索；活动匹配则把一群有共同场景的人放进独立小池，在报名截止后完成一次匹配。</p>
+          </div>
+          <div className="grid md:grid-cols-2 gap-5">
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-7">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-400/15 text-orange-300"><Sparkles size={24}/></div>
+              <h3 className="mt-5 text-xl font-semibold">每周推荐</h3>
+              <p className="mt-2 text-sm leading-6 text-white/60">完善资料和价值观问卷后，每周收到一位双向满足必要条件的推荐。</p>
+              <Btn variant="secondary" className="mt-6" onClick={() => navigate(user ? "/matches" : "/register")}>查看匹配方式 <ArrowRight size={17}/></Btn>
+            </div>
+            <div className="rounded-3xl border border-white/10 bg-white/5 p-7">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-400/15 text-violet-300"><Heart size={24}/></div>
+              <h3 className="mt-5 text-xl font-semibold">活动匹配</h3>
+              <p className="mt-2 text-sm leading-6 text-white/60">报名公开或私密活动，为本场单独调整条件；主办方结束报名后手动运行一次匹配。</p>
+              <Btn variant="secondary" className="mt-6" onClick={() => user ? navigate("/events") : V2_DEMO_MODE ? enterDemo("/events") : navigate("/register")}>{user ? "探索活动" : V2_DEMO_MODE ? "体验活动演示" : "探索活动"} <ArrowRight size={17}/></Btn>
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Sample match */}
       <section className="bg-secondary border-y border-border py-16">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -918,7 +1000,7 @@ function LandingPage() {
           </div>
           <div className="max-w-md mx-auto bg-card rounded-2xl border border-border p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-4">
-              <img src="/example_boy.webp" alt="晓晨" className="w-12 h-12 rounded-full object-cover"/>
+              <img src={exampleBoyPhoto} alt="晓晨" className="w-12 h-12 rounded-full object-cover"/>
               <div>
                 <p className="font-semibold">晓晨</p>
                 <p className="text-xs text-muted-foreground">本周推荐 · 2026-07-07</p>
@@ -940,13 +1022,13 @@ function LandingPage() {
           <Shield size={36} className="mx-auto mb-4 text-primary"/>
           <h2 className="text-2xl font-bold mb-4" style={{ fontFamily:"'Noto Serif SC', serif" }}>你的隐私，我们认真对待</h2>
           <p className="text-muted-foreground leading-relaxed mb-6">
-            你的联系方式仅会在你成为对方的本周推荐时展示。你可以随时切换为"暂停"状态——暂停后你不会收到推荐，也不会出现在他人的推荐列表中。
+            每周推荐和每场活动的结果彼此独立。活动中的联系方式会按照报名时确认的规则开放；主办方默认只看到汇总，不会看到你的标准资料与联系方式。
           </p>
           <div className="grid sm:grid-cols-2 gap-4 text-left">
             {[
-              "联系方式仅对当周推荐对象可见",
-              "随时一键暂停，无需理由",
-              "暂停不删除问卷和历史记录",
+              "真实姓名和完整出生日期始终私密",
+              "每项选填资料可设为仅用于匹配",
+              "暂停每周匹配不影响已报名活动",
               "不向第三方出售任何数据",
             ].map(t => (
               <div key={t} className="flex items-start gap-2 p-3 bg-card rounded-xl border border-border">
@@ -1083,7 +1165,7 @@ function RegisterPage() {
 }
 
 function LoginPage() {
-  const { navigate, login } = useApp();
+  const { navigate, login, enterDemo } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
@@ -1122,6 +1204,12 @@ function LoginPage() {
             <button type="button" className="text-sm text-primary hover:underline">忘记密码？</button>
           </div>
           <Btn type="submit" className="w-full" size="lg" disabled={submitting}>{submitting ? "登录中…" : "登录"}</Btn>
+          {V2_DEMO_MODE ? (
+            <div className="space-y-2 border-t border-border pt-5">
+              <Btn type="button" variant="secondary" className="w-full" size="lg" onClick={() => enterDemo()}>无需账号，直接体验演示</Btn>
+              <p className="text-center text-xs text-muted-foreground">演示资料和操作只保存在当前浏览器，不会发送给现有后端。</p>
+            </div>
+          ) : null}
           <p className="text-center text-sm text-muted-foreground">
             还没有账号？<button type="button" onClick={() => navigate("/register")} className="text-primary font-medium hover:underline">免费注册</button>
           </p>
@@ -2389,7 +2477,7 @@ function Router() {
     "/": <LandingPage/>,
     "/register": <RegisterPage/>,
     "/login": <LoginPage/>,
-    "/dashboard": <DashboardPage/>,
+    "/dashboard": <Navigate to="/home" replace />,
     "/questionnaire": <QuestionnairePage/>,
     "/questionnaire/complete": <QuestionnaireCompletePage/>,
     "/results": <ResultsPage/>,
@@ -2416,12 +2504,44 @@ export default function App() {
 }
 
 function AppRouterWrapper() {
-  const { route, booting } = useApp();
+  const { route, booting, user, questionnaire, weeklyMatch, matchState, updateUser, logout, navigate } = useApp();
+  const location = useLocation();
   const isQuestionnaire = route === "/questionnaire";
   const isCompletion = route === "/questionnaire/complete";
+  const isV2Route = route === "/home" || route === "/profile" || route === "/matches" || route.startsWith("/events/") || route === "/events" || (route.startsWith("/matches/") && route !== "/matches/current");
+  const guestEventMatch = route === "/events/new" ? null : route.match(/^\/events\/([^/]+)$/);
 
   if (booting) {
     return <div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">加载中…</div>;
+  }
+
+  if (isV2Route) {
+    if (!user && guestEventMatch) {
+      const returnTo = `${route}${location.search}`;
+      return <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">正在打开活动邀请…</div>}><GuestEventPreview eventId={decodeURIComponent(guestEventMatch[1])} onLogin={() => navigate(`/login?returnTo=${encodeURIComponent(returnTo)}`)} onRegister={() => navigate(`/register?returnTo=${encodeURIComponent(returnTo)}`)} /></React.Suspense>;
+    }
+    if (!user) {
+      const returnTo = `${route}${location.search}`;
+      const loginPath = route.startsWith("/events/") ? `/login?returnTo=${encodeURIComponent(returnTo)}` : "/login";
+      return <Navigate to={loginPath} replace />;
+    }
+    return (
+      <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">正在准备新的匹配体验…</div>}>
+        <V2Experience
+          fallbackDisplayName={user.displayName}
+          weeklyStatus={user.status}
+          questionnaireStatus={user.questionnaireStatus}
+          weeklyMatch={user.status === "active" ? weeklyMatch : null}
+          nextRefreshDate={weeklyMatch?.nextRefreshDate ?? matchState?.nextRefreshDate}
+          onWeeklyToggle={() => {
+            const nextStatus = user.status === "active" ? "inactive" : "active";
+            void updateUser({ status: nextStatus });
+            toast(nextStatus === "active" ? "每周匹配已开启" : "每周匹配已暂停；活动报名不受影响");
+          }}
+          onLogout={logout}
+        />
+      </React.Suspense>
+    );
   }
 
   return (
