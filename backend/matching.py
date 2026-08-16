@@ -17,9 +17,15 @@ Gale-Shapley's stability proof requires a two-sided market (classically
 "men propose, women receive"). Every user has a `gender` ("男"/"女"),
 assumed heterosexual by default, so `_split_into_groups` splits the
 eligible pool along that real line: 男 propose, 女 receive.
+
+On top of the questionnaire, each person's free-text "对 TA 的期待" is compared
+against candidates' bios (see text_match) and folded in as a minority share of
+the ranking score. It only reorders candidates — it is never a filter, so no
+one is excluded for writing nothing.
 """
 from datetime import datetime, timedelta, timezone
 
+import text_match
 from questionnaire_config import VALUE_DIMENSIONS, ALL_QUESTION_IDS, SPECTRUM_MIN, SPECTRUM_MAX
 
 IMPORTANT_QUESTION_WEIGHT = 3.0
@@ -51,14 +57,54 @@ def _directional_score(viewer_answers, viewer_important_ids, other_answers):
     return weighted_sum / total_weight
 
 
-def pair_score(user_a, user_b):
+def build_text_index(eligible_users):
+    """Text index over the whole eligible pool.
+
+    IDF has to see every document at once — how distinctive "喜欢看书" is depends
+    on how many other people said it — so this is built per pairing run from the
+    pool being paired, not persisted per user.
+    """
+    documents = []
+    for user in eligible_users:
+        documents.append(user.get("bio") or "")
+        documents.append(user.get("match_preference") or "")
+    return text_match.Index(documents)
+
+
+def text_fit(viewer, other, text_index):
+    """How well `other`'s bio answers what `viewer` said they were looking for.
+    None when either the index or the viewer's expectation is missing."""
+    if text_index is None:
+        return None
+    return text_index.score(viewer.get("match_preference"), other.get("bio"))
+
+
+def shared_interest_terms(viewer, other, text_index, limit=3):
+    """Words present in both the viewer's expectation and the other's bio, for
+    explaining the recommendation in the UI. Empty when there is no overlap."""
+    if text_index is None:
+        return []
+    return text_index.shared(viewer.get("match_preference"), other.get("bio"), limit)
+
+
+def preference_score(viewer, other, text_index=None):
+    """The full directional score used for ranking: questionnaire closeness,
+    nudged by free-text fit."""
+    questionnaire = _directional_score(
+        viewer["answers"], viewer["important_question_ids"], other["answers"]
+    )
+    return text_match.blend(questionnaire, text_fit(viewer, other, text_index))
+
+
+def pair_score(user_a, user_b, text_index=None):
     """Symmetric compatibility score for the pair — not used by the
     matching algorithm itself (Gale-Shapley only needs each side's own
     directional preference order), but used afterwards to compute a single
     display score for a locked-in pair."""
-    score_a_view = _directional_score(user_a["answers"], user_a["important_question_ids"], user_b["answers"])
-    score_b_view = _directional_score(user_b["answers"], user_b["important_question_ids"], user_a["answers"])
-    return (score_a_view + score_b_view) / 2
+    return (
+        preference_score(user_a, user_b, text_index)
+        + preference_score(user_b, user_a, text_index)
+    ) / 2
 
 
 def _split_into_groups(eligible_users):
@@ -148,7 +194,7 @@ def mutually_acceptable(user_a, user_b):
     )
 
 
-def _preference_order(viewer, candidates, exclusions):
+def _preference_order(viewer, candidates, exclusions, text_index=None):
     """Rank candidates for viewer, most-preferred first, dropping anyone either
     side has permanently excluded or whose per-question hard filters fail.
 
@@ -159,10 +205,13 @@ def _preference_order(viewer, candidates, exclusions):
     unacceptable, so they can never block. The per-question filter is applied
     symmetrically via mutually_acceptable, so both sides' lists agree on who is
     acceptable — a one-sided filter would break that guarantee.
+
+    Free text affects only the ordering within that surviving set, so it cannot
+    make anyone unmatchable.
     """
     blocked = exclusions.get(viewer["id"], frozenset())
     scored = [
-        (_directional_score(viewer["answers"], viewer["important_question_ids"], c["answers"]), c["id"])
+        (preference_score(viewer, c, text_index), c["id"])
         for c in candidates
         if c["id"] not in blocked and mutually_acceptable(viewer, c)
     ]
@@ -170,10 +219,12 @@ def _preference_order(viewer, candidates, exclusions):
     return [uid for _, uid in scored]
 
 
-def gale_shapley_matching(eligible_users, exclusions=None):
-    """eligible_users: list of dicts with 'id', 'answers', 'important_question_ids'.
+def gale_shapley_matching(eligible_users, exclusions=None, text_index=None):
+    """eligible_users: list of dicts with 'id', 'answers', 'important_question_ids',
+    and optionally 'bio'/'match_preference' for the free-text signal.
     exclusions: optional {user_id: set(user_id)} of mutually-excluded pairs,
     as built by build_exclusions().
+    text_index: optional text_match.Index; built from the pool if omitted.
 
     Returns list of (proposer_id, receiver_id, score) for everyone who ended
     up matched. Runs the classic propose-reject loop between the two groups
@@ -181,14 +232,16 @@ def gale_shapley_matching(eligible_users, exclusions=None):
     groups end up different sizes, if either group is empty, or if everyone
     they could have matched with is excluded."""
     exclusions = exclusions or {}
+    if text_index is None:
+        text_index = build_text_index(eligible_users)
     proposers, receivers = _split_into_groups(eligible_users)
     if not proposers or not receivers:
         return []
 
     by_id = {u["id"]: u for u in eligible_users}
-    proposer_prefs = {p["id"]: _preference_order(p, receivers, exclusions) for p in proposers}
+    proposer_prefs = {p["id"]: _preference_order(p, receivers, exclusions, text_index) for p in proposers}
     receiver_rank = {
-        r["id"]: {pid: rank for rank, pid in enumerate(_preference_order(r, proposers, exclusions))}
+        r["id"]: {pid: rank for rank, pid in enumerate(_preference_order(r, proposers, exclusions, text_index))}
         for r in receivers
     }
 
@@ -214,7 +267,7 @@ def gale_shapley_matching(eligible_users, exclusions=None):
         else:
             free_proposers.append(pid)
 
-    return [(pid, rid, pair_score(by_id[pid], by_id[rid])) for rid, pid in engaged.items()]
+    return [(pid, rid, pair_score(by_id[pid], by_id[rid], text_index)) for rid, pid in engaged.items()]
 
 
 def dimension_comparisons(user_a_answers, user_b_answers):

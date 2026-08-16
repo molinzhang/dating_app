@@ -79,6 +79,9 @@ interface WeeklyMatch {
   // Coarse view of the other person's response. A skip is reported as "seen",
   // never disclosed as a rejection.
   partnerSignal?: "interested" | "seen" | "unseen";
+  // Words your stated expectations share with their bio. Empty when either
+  // side wrote nothing, or once the match is skipped.
+  sharedInterests?: string[];
 }
 
 // ============================================================
@@ -2287,6 +2290,18 @@ function MatchDetailPage() {
                 </div>
               </div>
             </div>
+            {m.sharedInterests && m.sharedInterests.length > 0 && (
+              <div className="mb-4">
+                <p className="text-xs text-muted-foreground mb-2">TA 的自我介绍里提到了你期待的：</p>
+                <div className="flex flex-wrap gap-2">
+                  {m.sharedInterests.map(term => (
+                    <span key={term} className="px-2.5 py-1 rounded-full bg-primary/10 text-primary text-xs font-medium">
+                      {term}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
             <p className="text-sm text-muted-foreground leading-relaxed">
               这位推荐来自系统根据你的价值画像筛选，不代表完美匹配，而是对话的起点。
             </p>

@@ -10,12 +10,13 @@ Idempotent: re-running only creates what's missing.
 Run: python3 seed_demo_pool.py [spare_per_gender]
 """
 import random
+import re
 import sys
 
 import auth
 import db
 from questionnaire_config import ALL_QUESTION_IDS
-from seed_fake_data import ARCHETYPES, BIOS, IMPORTANT_IDS_BY_ARCHETYPE, jitter
+from seed_fake_data import ARCHETYPES, IMPORTANT_IDS_BY_ARCHETYPE, INTEREST_PROFILES, jitter
 
 random.seed(11)
 
@@ -29,17 +30,58 @@ SPARE_NAMES = {
 }
 
 
-def ensure_user(email, name, gender, archetype):
+# Only accounts whose email matches this exactly are treated as seeded demo
+# data that the script may rewrite. Real users' free text is theirs.
+DEMO_EMAIL = re.compile(r"^demo_[mf]\d+@example\.com$")
+
+
+def _profile_for(slot, gender):
+    """Deterministic bio/expectation for a demo slot.
+
+    Offsetting 女 by half the list keeps the two sides from lining up
+    index-for-index, which would hand every proposer a perfect text twin and
+    make the pairing look better than the algorithm actually is.
+    """
+    offset = 0 if gender == "男" else len(INTEREST_PROFILES) // 2
+    return INTEREST_PROFILES[(slot + offset) % len(INTEREST_PROFILES)]
+
+
+def ensure_user(email, name, gender, archetype, slot):
     existing = db.get_user_by_email(email)
     if existing:
         return existing["id"], False
     password_hash, salt = auth.hash_password("password123")
     user_id = db.create_user(email, password_hash, salt, name, gender, {})
-    db.update_user(user_id, {"bio": f"[{archetype}] {BIOS[archetype]}"})
+    bio, expectation = _profile_for(slot, gender)
+    db.update_user(user_id, {"bio": bio, "match_preference": expectation})
     answers = dict(zip(ALL_QUESTION_IDS, jitter(ARCHETYPES[archetype])))
     draft = db.create_draft(user_id, version=1, answers=answers, current_section=5)
     db.submit_response(draft["id"], IMPORTANT_IDS_BY_ARCHETYPE[archetype])
     return user_id, True
+
+
+def backfill_demo_text():
+    """Give already-seeded demo accounts varied free text.
+
+    Earlier runs wrote one shared sentence per archetype and no expectation at
+    all, which left the text matcher with three distinct documents across the
+    whole pool and nothing to compare them against. Rewrites demo accounts
+    only, and only ever their bio/expectation."""
+    with db._cursor() as cur:
+        cur.execute("SELECT id, email, gender, bio, match_preference FROM users ORDER BY id")
+        rows = [dict(r) for r in cur.fetchall()]
+
+    updated = 0
+    for row in rows:
+        if not DEMO_EMAIL.match(row["email"] or ""):
+            continue
+        slot = int(re.search(r"\d+", row["email"]).group())
+        bio, expectation = _profile_for(slot, row["gender"])
+        if row["bio"] == bio and row["match_preference"] == expectation:
+            continue
+        db.update_user(row["id"], {"bio": bio, "match_preference": expectation})
+        updated += 1
+    return updated
 
 
 def matchable_counts():
@@ -82,12 +124,16 @@ def main(spare_per_gender=4):
             email = f"demo_{prefix}{slot}@example.com"
             if db.get_user_by_email(email):
                 continue
-            ensure_user(email, names[slot], gender, archetypes[slot % len(archetypes)])
+            ensure_user(email, names[slot], gender, archetypes[slot % len(archetypes)], slot)
             created += 1
             made_here += 1
             print(f"  + {names[slot]} ({gender}) {email}")
         if made_here < need:
             print(f"  ⚠️  {gender} 备用名字不够，还差 {need - made_here} 个（请在 SPARE_NAMES 里加名字）")
+
+    refreshed = backfill_demo_text()
+    if refreshed:
+        print(f"  ↻ 为 {refreshed} 个 demo 账号补写了自我介绍和期待（真实用户不动）")
 
     men, women = matchable_counts()
     print(f"\n新增 {created} 人，现在可匹配：男 {men} / 女 {women}")

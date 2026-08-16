@@ -130,6 +130,10 @@ def serialize_weekly_match(match_row):
         "matchedUser": matched,
         "partnerSignal": _partner_signal(match_row["user_id"], matched_id),
         "compatibilitySummary": match_row["compatibility_summary"],
+        # Words this user's stated expectations share with the match's bio.
+        # Hidden once skipped, for the same reason the contacts are: the user
+        # dismissed this person, so nothing further about them is surfaced.
+        "sharedInterests": [] if skipped else json.loads(match_row.get("shared_interests") or "[]"),
         "dimensionComparisons": json.loads(match_row["dimension_comparisons"]),
         "recommendationDate": match_row["recommendation_date"][:10],
         "nextRefreshDate": match_row["next_refresh_date"][:10],
@@ -176,6 +180,10 @@ def _collect_eligible():
         {
             "id": u["id"],
             "gender": u["gender"],
+            # Free text feeds the ranking nudge in matching.build_text_index;
+            # absent text just means no text signal for that person.
+            "bio": u.get("bio"),
+            "match_preference": u.get("match_preference"),
             "answers": responses[u["id"]]["answers"],
             "match_preferences": responses[u["id"]]["match_preferences"],
             "important_question_ids": responses[u["id"]]["important_question_ids"],
@@ -218,8 +226,9 @@ def maybe_regenerate_weekly_matches():
         if not _needs_repair(eligible_ids, responses, cycle):
             return
 
+        text_index = matching.build_text_index(eligible)
         assignments = matching.gale_shapley_matching(
-            eligible, matching.build_exclusions(db.get_dislike_pairs())
+            eligible, matching.build_exclusions(db.get_dislike_pairs()), text_index
         )
         # A mid-cycle re-pair keeps the current week's deadline. Starting a
         # fresh 7 days would let frequent retakes push everyone's refresh date
@@ -229,18 +238,22 @@ def maybe_regenerate_weekly_matches():
             else matching.next_refresh_from(now).isoformat()
         )
         answers_by_id = {u["id"]: u["answers"] for u in eligible}
+        by_id = {u["id"]: u for u in eligible}
         # Carry over what people already did with a recommendation that
         # survives the re-pair, so a skip isn't quietly undone.
         previous = db.get_current_response_statuses()
 
         rows = []
         for a_id, b_id, _score in assignments:
+            user_a, user_b = by_id[a_id], by_id[b_id]
             comparisons_a, summary_a = matching.build_match_payload(answers_by_id[a_id], answers_by_id[b_id])
             rows.append((a_id, b_id, summary_a, comparisons_a, now_str, next_refresh_date,
-                         previous.get((a_id, b_id), "unseen")))
+                         previous.get((a_id, b_id), "unseen"),
+                         matching.shared_interest_terms(user_a, user_b, text_index)))
             comparisons_b, summary_b = matching.build_match_payload(answers_by_id[b_id], answers_by_id[a_id])
             rows.append((b_id, a_id, summary_b, comparisons_b, now_str, next_refresh_date,
-                         previous.get((b_id, a_id), "unseen")))
+                         previous.get((b_id, a_id), "unseen"),
+                         matching.shared_interest_terms(user_b, user_a, text_index)))
         db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
 
 

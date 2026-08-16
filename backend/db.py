@@ -164,7 +164,13 @@ def init_db():
             dimension_comparisons TEXT NOT NULL,
             recommendation_date TEXT NOT NULL,
             next_refresh_date TEXT NOT NULL,
-            response_status TEXT NOT NULL DEFAULT 'unseen'
+            response_status TEXT NOT NULL DEFAULT 'unseen',
+            -- Words shared between this user's stated expectations and the
+            -- match's bio. Frozen at pairing time because the scores are
+            -- relative to the pool that was paired: recomputing later, against
+            -- a different pool, would silently change what a past
+            -- recommendation claimed.
+            shared_interests TEXT NOT NULL DEFAULT '[]'
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -209,6 +215,9 @@ def init_db():
 
         ALTER TABLE questionnaire_responses
             ADD COLUMN IF NOT EXISTS match_preferences TEXT NOT NULL DEFAULT '{}';
+
+        ALTER TABLE weekly_matches
+            ADD COLUMN IF NOT EXISTS shared_interests TEXT NOT NULL DEFAULT '[]';
 
         CREATE INDEX IF NOT EXISTS idx_responses_user_status
             ON questionnaire_responses(user_id, status);
@@ -544,9 +553,11 @@ def record_match_cycle(generated_at, next_refresh_date, participant_ids, match_r
             execute_values(
                 cur,
                 """INSERT INTO weekly_matches (user_id, matched_user_id, compatibility_summary,
-                                                dimension_comparisons, recommendation_date, next_refresh_date, response_status)
+                                                dimension_comparisons, recommendation_date, next_refresh_date,
+                                                response_status, shared_interests)
                    VALUES %s""",
-                [(u, m, s, json.dumps(c), rd, nrd, st) for u, m, s, c, rd, nrd, st in rows],
+                [(u, m, summary, json.dumps(c), rd, nrd, st, json.dumps(si, ensure_ascii=False))
+                 for u, m, summary, c, rd, nrd, st, si in rows],
             )
         return cycle_id
 
