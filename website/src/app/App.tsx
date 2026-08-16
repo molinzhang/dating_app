@@ -324,7 +324,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     setWeeklyMatch(null);
     setMatchState(null);
     const queryReturnTo = new URLSearchParams(location.search).get("returnTo");
-    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/home");
+    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/dashboard");
     routerNavigate(nextRoute);
   }, [location.search, routerNavigate]);
 
@@ -335,7 +335,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
       setToken(payload.token);
       applyBootstrap(payload);
       const returnTo = new URLSearchParams(window.location.search).get("returnTo");
-      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/home");
+      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/dashboard");
       return null;
     } catch (e) {
       // Distinguish wrong credentials from the server being unreachable —
@@ -742,9 +742,9 @@ function Header() {
           <nav className="hidden md:flex items-center gap-1">
             {user ? (
               <>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/home")}>首页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>首页</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/events")}>活动</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/profile")}>我的资料</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/settings")}>我的资料</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/settings")}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/results")}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
@@ -798,10 +798,10 @@ function Header() {
                     <p className="text-xs text-muted-foreground">{user.email}</p>
                   </div>
                 </div>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/home"); setMenuOpen(false); }}>首页</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/dashboard"); setMenuOpen(false); }}>首页</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/matches"); setMenuOpen(false); }}>匹配</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/events"); setMenuOpen(false); }}>活动</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/profile"); setMenuOpen(false); }}>我的资料</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/settings"); setMenuOpen(false); }}>我的资料</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/settings"); setMenuOpen(false); }}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/results"); setMenuOpen(false); }}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
@@ -942,7 +942,7 @@ function LandingPage() {
   const ctaRoute: Route = !user
     ? "/register"
     : user.questionnaireStatus === "completed"
-      ? "/home"
+      ? "/dashboard"
       : "/questionnaire";
   const ctaLabel = !user
     ? "完成问卷，开启匹配"
@@ -965,7 +965,7 @@ function LandingPage() {
             用价值观问卷和双方都认可的必要条件，认真缩小彼此愿意认识的范围。你可以等待每周推荐，也可以借一场共同活动自然相遇。
           </p>
           {user ? (
-            <Btn size="lg" onClick={() => navigate("/home")}>进入我的主页 <ArrowRight size={20}/></Btn>
+            <Btn size="lg" onClick={() => navigate("/dashboard")}>进入我的主页 <ArrowRight size={20}/></Btn>
           ) : (
             <div className="flex flex-wrap gap-3">
               <Btn size="lg" onClick={() => navigate("/register")}>开始探索 <ArrowRight size={20}/></Btn>
@@ -2773,7 +2773,7 @@ function MatchSettingsPage() {
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
       <div className="flex items-center gap-3 mb-8">
-        <button onClick={() => navigate("/home")} className="p-2 rounded-xl hover:bg-muted transition-colors">
+        <button onClick={() => navigate("/dashboard")} className="p-2 rounded-xl hover:bg-muted transition-colors">
           <ChevronLeft size={20}/>
         </button>
         <div>
@@ -2800,7 +2800,7 @@ function Router() {
     "/": <LandingPage/>,
     "/register": <RegisterPage/>,
     "/login": <LoginPage/>,
-    "/dashboard": <Navigate to="/home" replace />,
+    "/dashboard": <DashboardPage/>,
     "/questionnaire": <QuestionnairePage/>,
     "/questionnaire/complete": <QuestionnaireCompletePage/>,
     "/results": <ResultsPage/>,
