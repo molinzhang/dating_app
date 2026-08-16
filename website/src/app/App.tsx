@@ -38,6 +38,71 @@ interface AppUser {
   photoUrl?: string;
   bio?: string;
   matchPreference?: string;
+  birthDate?: string;
+  /** Derived server-side from birthDate — never stored, so it can't go stale. */
+  age?: number | null;
+  orientation?: Orientation;
+  /** Which gender's pool this account is matched in. */
+  seekingGender?: "男" | "女";
+  preferredAgeMin?: number | null;
+  preferredAgeMax?: number | null;
+}
+
+// Same vocabulary as the backend (orientation.py) and V2 (features/v2/orientation.ts).
+type Orientation = "straight" | "gay" | "bisexual";
+
+interface RegisterData {
+  email: string;
+  password: string;
+  gender: "男" | "女";
+  birthDate: string;
+  orientation: Orientation;
+  seekingGender: "男" | "女";
+  wechat?: string;
+  instagram?: string;
+  xiaohongshu?: string;
+  linkedin?: string;
+}
+
+const ORIENTATION_LABELS: Record<Orientation, string> = {
+  straight: "异性恋",
+  gay: "同性恋",
+  bisexual: "双性恋",
+};
+
+const oppositeGender = (gender: "男" | "女") => (gender === "男" ? "女" : "男");
+
+/**
+ * Only a bisexual user actually chooses; for the others the target gender
+ * follows from their own, and letting them pick would just create rows the
+ * backend has to reject.
+ */
+export function resolveSeekingGender(
+  orientation: Orientation,
+  gender: "男" | "女",
+  chosen: "男" | "女" | "",
+): "男" | "女" {
+  if (orientation === "bisexual") return (chosen || oppositeGender(gender)) as "男" | "女";
+  return orientation === "gay" ? gender : oppositeGender(gender);
+}
+
+/** Whole years, counting whether this year's birthday has passed. */
+export function ageFromBirthDate(birthDate: string, now: Date = new Date()): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(birthDate.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const born = new Date(Date.UTC(year, month - 1, day));
+  // Rejects things like 2026-02-30, which Date silently rolls forward.
+  if (born.getUTCFullYear() !== year || born.getUTCMonth() !== month - 1 || born.getUTCDate() !== day) {
+    return null;
+  }
+  if (born.getTime() > now.getTime()) return null;
+  const hadBirthday =
+    now.getUTCMonth() + 1 > month ||
+    (now.getUTCMonth() + 1 === month && now.getUTCDate() >= day);
+  return now.getUTCFullYear() - year - (hadBirthday ? 0 : 1);
 }
 
 const V2_DEMO_MODE = (import.meta as any).env?.VITE_DATING_SERVICE_MODE !== "api";
@@ -179,7 +244,7 @@ interface AppCtx {
   navigate: (r: Route) => void;
   enterDemo: (destination?: Route) => void;
   login: (email: string, pw: string) => Promise<string | null>;
-  register: (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) => Promise<string | null>;
+  register: (data: RegisterData) => Promise<string | null>;
   logout: () => void;
   updateUser: (u: Partial<AppUser>) => Promise<void>;
   uploadPhoto: (file: File) => Promise<void>;
@@ -281,7 +346,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [applyBootstrap, routerNavigate]);
 
-  const register = useCallback(async (data: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }): Promise<string | null> => {
+  const register = useCallback(async (data: RegisterData): Promise<string | null> => {
     try {
       const payload = await api.register(data);
       localStorage.removeItem(V2_DEMO_SESSION_KEY);
@@ -307,10 +372,19 @@ function AppProvider({ children }: { children: React.ReactNode }) {
       setUser(current => current ? { ...current, ...updates } : current);
       return;
     }
-    const backendFields: { status?: string; bio?: string; matchPreference?: string } = {};
+    const backendFields: {
+      status?: string; bio?: string; matchPreference?: string;
+      birthDate?: string; orientation?: Orientation; seekingGender?: "男" | "女";
+      preferredAgeMin?: number | null; preferredAgeMax?: number | null;
+    } = {};
     if (updates.status !== undefined) backendFields.status = updates.status;
     if (updates.bio !== undefined) backendFields.bio = updates.bio;
     if (updates.matchPreference !== undefined) backendFields.matchPreference = updates.matchPreference;
+    if (updates.birthDate !== undefined) backendFields.birthDate = updates.birthDate;
+    if (updates.orientation !== undefined) backendFields.orientation = updates.orientation;
+    if (updates.seekingGender !== undefined) backendFields.seekingGender = updates.seekingGender;
+    if (updates.preferredAgeMin !== undefined) backendFields.preferredAgeMin = updates.preferredAgeMin;
+    if (updates.preferredAgeMax !== undefined) backendFields.preferredAgeMax = updates.preferredAgeMax;
 
     if (Object.keys(backendFields).length > 0) {
       try {
@@ -1056,6 +1130,9 @@ function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [gender, setGender] = useState<"男" | "女" | "">("");
+  const [birthDate, setBirthDate] = useState("");
+  const [orientation, setOrientation] = useState<Orientation>("straight");
+  const [seekingGender, setSeekingGender] = useState<"男" | "女" | "">("");
   const [wechat, setWechat] = useState("");
   const [instagram, setInstagram] = useState("");
   const [xiaohongshu, setXiaohongshu] = useState("");
@@ -1075,6 +1152,17 @@ function RegisterPage() {
     if (password.length < 8) e.password = "密码至少需要8位";
     if (password !== confirm) e.confirm = "两次密码不一致";
     if (!gender) e.gender = "请选择性别";
+    if (!birthDate) {
+      e.birthDate = "请填写出生日期";
+    } else {
+      const age = ageFromBirthDate(birthDate);
+      if (age === null) e.birthDate = "请输入有效的出生日期";
+      else if (age < 18) e.birthDate = "须满 18 岁才能注册";
+      else if (age > 99) e.birthDate = "请检查出生日期";
+    }
+    // Bisexual is the only orientation where the target gender is a real
+    // choice; for the others it follows from gender, so we don't ask.
+    if (orientation === "bisexual" && !seekingGender) e.seekingGender = "请选择本轮希望匹配的性别";
     if (!agreed) e.agreed = "请同意服务条款";
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -1084,7 +1172,12 @@ function RegisterPage() {
     e.preventDefault();
     if (!validate()) return;
     setSubmitting(true);
-    const errorMessage = await register({ email, password, gender: gender as "男" | "女", wechat, instagram, xiaohongshu, linkedin });
+    const errorMessage = await register({
+      email, password, gender: gender as "男" | "女",
+      birthDate, orientation,
+      seekingGender: resolveSeekingGender(orientation, gender as "男" | "女", seekingGender),
+      wechat, instagram, xiaohongshu, linkedin,
+    });
     setSubmitting(false);
     if (errorMessage) setErrors(prev => ({ ...prev, email: errorMessage }));
   };
@@ -1127,6 +1220,60 @@ function RegisterPage() {
               ))}
             </div>
             {errors.gender && <p className="text-destructive text-sm mt-1.5 flex items-center gap-1"><AlertTriangle size={14}/>{errors.gender}</p>}
+          </div>
+
+          <Input
+            label="出生日期"
+            type="date"
+            value={birthDate}
+            onChange={e => setBirthDate(e.target.value)}
+            error={errors.birthDate}
+            autoComplete="bday"
+          />
+
+          <div>
+            <label className="text-sm font-medium text-foreground block mb-1.5">性取向</label>
+            <div className="flex gap-2">
+              {(["straight", "gay", "bisexual"] as const).map(o => (
+                <button
+                  key={o}
+                  type="button"
+                  onClick={() => { setOrientation(o); if (o !== "bisexual") setSeekingGender(""); }}
+                  className={cn(
+                    "flex-1 px-3 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                    orientation === o ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border hover:border-primary/50"
+                  )}
+                >
+                  {ORIENTATION_LABELS[o]}
+                </button>
+              ))}
+            </div>
+            {orientation === "bisexual" ? (
+              <div className="mt-3">
+                <label className="text-sm font-medium text-foreground block mb-1.5">本轮希望匹配</label>
+                <div className="flex gap-3">
+                  {(["男","女"] as const).map(g => (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => setSeekingGender(g)}
+                      className={cn(
+                        "flex-1 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all",
+                        seekingGender === g ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border hover:border-primary/50"
+                      )}
+                    >
+                      {g}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground mt-1.5">每轮只进一个池子，之后可以在个人资料里改。</p>
+                {errors.seekingGender && <p className="text-destructive text-sm mt-1.5 flex items-center gap-1"><AlertTriangle size={14}/>{errors.seekingGender}</p>}
+              </div>
+            ) : gender ? (
+              <p className="text-xs text-muted-foreground mt-1.5">
+                将为你匹配{resolveSeekingGender(orientation, gender, "")}性。同性和异性是两个互不重叠的池子。
+              </p>
+            ) : null}
           </div>
 
           <div className="border-t border-border pt-5">
@@ -1230,6 +1377,11 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
   const [editing, setEditing] = useState(false);
   const [bio, setBio] = useState(user.bio ?? "");
   const [pref, setPref] = useState(user.matchPreference ?? "");
+  const [birthDate, setBirthDate] = useState(user.birthDate ?? "");
+  const [orientation, setOrientation] = useState<Orientation>(user.orientation ?? "straight");
+  const [seekingGender, setSeekingGender] = useState<"男" | "女">(user.seekingGender ?? oppositeGender(user.gender));
+  const [ageMin, setAgeMin] = useState(user.preferredAgeMin != null ? String(user.preferredAgeMin) : "");
+  const [ageMax, setAgeMax] = useState(user.preferredAgeMax != null ? String(user.preferredAgeMax) : "");
   const [uploading, setUploading] = useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
@@ -1245,7 +1397,29 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
   };
 
   const save = () => {
-    onUpdate({ bio: bio.trim(), matchPreference: pref.trim() });
+    if (birthDate) {
+      const age = ageFromBirthDate(birthDate);
+      if (age === null) { toast.error("出生日期格式不对"); return; }
+      if (age < 18) { toast.error("须满 18 岁"); return; }
+      if (age > 99) { toast.error("请检查出生日期"); return; }
+    }
+    // An empty box means "no preference", which is a real value the backend
+    // needs to see as null rather than as an unchanged field.
+    const min = ageMin.trim() === "" ? null : Number(ageMin);
+    const max = ageMax.trim() === "" ? null : Number(ageMax);
+    if (min !== null && (!Number.isInteger(min) || min < 18 || min > 99)) { toast.error("年龄下限需在 18-99 之间"); return; }
+    if (max !== null && (!Number.isInteger(max) || max < 18 || max > 99)) { toast.error("年龄上限需在 18-99 之间"); return; }
+    if (min !== null && max !== null && min > max) { toast.error("年龄下限不能大于上限"); return; }
+
+    onUpdate({
+      bio: bio.trim(),
+      matchPreference: pref.trim(),
+      ...(birthDate ? { birthDate } : {}),
+      orientation,
+      seekingGender: resolveSeekingGender(orientation, user.gender, seekingGender),
+      preferredAgeMin: min,
+      preferredAgeMax: max,
+    });
     setEditing(false);
     toast.success("个人资料已保存");
   };
@@ -1253,6 +1427,11 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
   const cancel = () => {
     setBio(user.bio ?? "");
     setPref(user.matchPreference ?? "");
+    setBirthDate(user.birthDate ?? "");
+    setOrientation(user.orientation ?? "straight");
+    setSeekingGender(user.seekingGender ?? oppositeGender(user.gender));
+    setAgeMin(user.preferredAgeMin != null ? String(user.preferredAgeMin) : "");
+    setAgeMax(user.preferredAgeMax != null ? String(user.preferredAgeMax) : "");
     setEditing(false);
   };
 
@@ -1356,6 +1535,105 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
             {editing && (
               <p className="text-right text-xs text-muted-foreground mt-1">{pref.length}/300</p>
             )}
+          </div>
+
+          <div className="border-t border-border pt-5 space-y-4">
+            <div>
+              <label className="block text-sm font-medium mb-1.5">出生日期</label>
+              {editing ? (
+                <input
+                  type="date"
+                  value={birthDate}
+                  onChange={e => setBirthDate(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all"
+                />
+              ) : (
+                <p className={cn("text-sm", user.age != null ? "text-foreground" : "text-muted-foreground italic")}>
+                  {user.age != null ? `${user.age} 岁（${user.birthDate}）` : "还没有填写出生日期"}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1.5">期待的年龄段</label>
+              {editing ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number" min={18} max={99} inputMode="numeric"
+                      value={ageMin} onChange={e => setAgeMin(e.target.value)} placeholder="不限"
+                      className="w-24 px-3 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    <span className="text-muted-foreground text-sm">到</span>
+                    <input
+                      type="number" min={18} max={99} inputMode="numeric"
+                      value={ageMax} onChange={e => setAgeMax(e.target.value)} placeholder="不限"
+                      className="w-24 px-3 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                    <span className="text-muted-foreground text-sm">岁</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    这是硬筛选：范围外的人不会被推荐给你。留空表示不限。填了范围后，没写出生日期的人也会被排除。
+                  </p>
+                </>
+              ) : (
+                <p className={cn("text-sm", (user.preferredAgeMin != null || user.preferredAgeMax != null) ? "text-foreground" : "text-muted-foreground italic")}>
+                  {user.preferredAgeMin == null && user.preferredAgeMax == null
+                    ? "不限"
+                    : `${user.preferredAgeMin ?? 18} - ${user.preferredAgeMax ?? 99} 岁`}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-1.5">性取向</label>
+              {editing ? (
+                <>
+                  <div className="flex gap-2">
+                    {(["straight", "gay", "bisexual"] as const).map(o => (
+                      <button
+                        key={o} type="button"
+                        onClick={() => {
+                          setOrientation(o);
+                          if (o !== "bisexual") setSeekingGender(resolveSeekingGender(o, user.gender, ""));
+                        }}
+                        className={cn(
+                          "flex-1 px-3 py-2 rounded-xl border text-sm font-medium transition-all",
+                          orientation === o ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border hover:border-primary/50"
+                        )}
+                      >
+                        {ORIENTATION_LABELS[o]}
+                      </button>
+                    ))}
+                  </div>
+                  {orientation === "bisexual" && (
+                    <div className="flex gap-2 mt-2">
+                      {(["男","女"] as const).map(g => (
+                        <button
+                          key={g} type="button" onClick={() => setSeekingGender(g)}
+                          className={cn(
+                            "flex-1 px-3 py-2 rounded-xl border text-sm transition-all",
+                            seekingGender === g ? "bg-primary text-primary-foreground border-primary" : "bg-card border-border hover:border-primary/50"
+                          )}
+                        >
+                          本轮匹配{g}性
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-1.5">
+                    同性和异性是两个互不重叠的池子。改了会立刻重新配对，本周推荐会换人。
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-foreground">
+                  {ORIENTATION_LABELS[user.orientation ?? "straight"]}
+                  <span className="text-muted-foreground">
+                    {" "}· 匹配{user.seekingGender ?? oppositeGender(user.gender)}性
+                  </span>
+                </p>
+              )}
+            </div>
           </div>
 
           {editing && (

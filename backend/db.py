@@ -139,6 +139,18 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'active',
             bio TEXT,
             match_preference TEXT,
+            -- Stored as a date rather than an age so the number cannot go
+            -- stale. 'straight' default keeps every pre-existing account in the
+            -- opposite-gender pool it was already matched in.
+            birth_date TEXT,
+            orientation TEXT NOT NULL DEFAULT 'straight',
+            seeking_gender TEXT,
+            preferred_age_min INTEGER,
+            preferred_age_max INTEGER,
+            -- Set whenever a field that affects pool assignment or eligibility
+            -- changes, so the pairing run can detect it the same way it detects
+            -- a questionnaire retake.
+            matching_profile_updated_at TEXT,
             photo_path TEXT,
             created_at TEXT NOT NULL
         );
@@ -219,6 +231,14 @@ def init_db():
         ALTER TABLE weekly_matches
             ADD COLUMN IF NOT EXISTS shared_interests TEXT NOT NULL DEFAULT '[]';
 
+        ALTER TABLE users
+            ADD COLUMN IF NOT EXISTS birth_date TEXT,
+            ADD COLUMN IF NOT EXISTS orientation TEXT NOT NULL DEFAULT 'straight',
+            ADD COLUMN IF NOT EXISTS seeking_gender TEXT,
+            ADD COLUMN IF NOT EXISTS preferred_age_min INTEGER,
+            ADD COLUMN IF NOT EXISTS preferred_age_max INTEGER,
+            ADD COLUMN IF NOT EXISTS matching_profile_updated_at TEXT;
+
         CREATE INDEX IF NOT EXISTS idx_responses_user_status
             ON questionnaire_responses(user_id, status);
         CREATE INDEX IF NOT EXISTS idx_matches_user
@@ -228,17 +248,28 @@ def init_db():
 
 # ---------------------------------------------------------------- users ----
 
-def create_user(email, password_hash, password_salt, display_name, gender, contacts):
+def create_user(email, password_hash, password_salt, display_name, gender, contacts, profile=None):
+    """profile carries the optional matching fields (birth_date, orientation,
+    seeking_gender, preferred_age_min/max). Omitting it leaves the column
+    defaults, which put the account in the opposite-gender pool with no age
+    preference — exactly how accounts behaved before these fields existed."""
+    profile = profile or {}
     with _cursor(commit=True) as cur:
         cur.execute(
             """INSERT INTO users (email, password_hash, password_salt, display_name, gender,
-                                   wechat, instagram, xiaohongshu, linkedin, status, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)
+                                   wechat, instagram, xiaohongshu, linkedin, status,
+                                   birth_date, orientation, seeking_gender,
+                                   preferred_age_min, preferred_age_max, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active',
+                       %s, COALESCE(%s, 'straight'), %s, %s, %s, %s)
                RETURNING id""",
             (
                 email, password_hash, password_salt, display_name, gender,
                 contacts.get("wechat"), contacts.get("instagram"),
                 contacts.get("xiaohongshu"), contacts.get("linkedin"),
+                profile.get("birth_date"), profile.get("orientation"),
+                profile.get("seeking_gender"), profile.get("preferred_age_min"),
+                profile.get("preferred_age_max"),
                 now_iso(),
             ),
         )

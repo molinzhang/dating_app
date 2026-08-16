@@ -15,6 +15,7 @@ import sys
 
 import auth
 import db
+import orientation
 from questionnaire_config import ALL_QUESTION_IDS
 from seed_fake_data import ARCHETYPES, IMPORTANT_IDS_BY_ARCHETYPE, INTEREST_PROFILES, jitter
 
@@ -35,6 +36,33 @@ SPARE_NAMES = {
 DEMO_EMAIL = re.compile(r"^demo_[mf]\d+@example\.com$")
 
 
+# Birth years spread across the range people actually register in, so an age
+# filter has something to bite on. Cycled by slot rather than randomised so
+# re-running the seeder never reshuffles anyone's age.
+BIRTH_YEARS = (1986, 1989, 1991, 1993, 1994, 1996, 1997, 1999, 2000, 2002)
+
+# Every Nth demo slot seeks its own gender, which is what populates the two
+# same-gender pools. Without this they are empty and the feature cannot be
+# demonstrated at all — a pool of one never pairs.
+SAME_GENDER_EVERY = 3
+
+
+def _birth_date_for(slot):
+    return f"{BIRTH_YEARS[slot % len(BIRTH_YEARS)]}-06-15"
+
+
+def _orientation_for(slot, gender):
+    """(orientation, seeking) for a demo slot.
+
+    Demo accounts deliberately get no age *preference*: a range on both sides
+    compounds, and the point of the spare pool is that a real visitor can
+    always find someone.
+    """
+    if slot % SAME_GENDER_EVERY == 0:
+        return orientation.GAY, gender
+    return orientation.STRAIGHT, orientation.opposite_gender(gender)
+
+
 def _profile_for(slot, gender):
     """Deterministic bio/expectation for a demo slot.
 
@@ -53,22 +81,29 @@ def ensure_user(email, name, gender, archetype, slot):
     password_hash, salt = auth.hash_password("password123")
     user_id = db.create_user(email, password_hash, salt, name, gender, {})
     bio, expectation = _profile_for(slot, gender)
-    db.update_user(user_id, {"bio": bio, "match_preference": expectation})
+    chosen, seeking = _orientation_for(slot, gender)
+    db.update_user(user_id, {
+        "bio": bio, "match_preference": expectation,
+        "birth_date": _birth_date_for(slot),
+        "orientation": chosen, "seeking_gender": seeking,
+    })
     answers = dict(zip(ALL_QUESTION_IDS, jitter(ARCHETYPES[archetype])))
     draft = db.create_draft(user_id, version=1, answers=answers, current_section=5)
     db.submit_response(draft["id"], IMPORTANT_IDS_BY_ARCHETYPE[archetype])
     return user_id, True
 
 
-def backfill_demo_text():
-    """Give already-seeded demo accounts varied free text.
+def backfill_demo_profiles():
+    """Bring already-seeded demo accounts up to date with the current fields.
 
-    Earlier runs wrote one shared sentence per archetype and no expectation at
-    all, which left the text matcher with three distinct documents across the
-    whole pool and nothing to compare them against. Rewrites demo accounts
-    only, and only ever their bio/expectation."""
+    Earlier runs wrote one shared sentence per archetype, no expectation, no
+    birth date and no orientation — which left the text matcher with three
+    distinct documents to compare, and left both same-gender pools empty and
+    every age filter matching nobody. Rewrites demo accounts only, and only
+    ever these matching fields."""
     with db._cursor() as cur:
-        cur.execute("SELECT id, email, gender, bio, match_preference FROM users ORDER BY id")
+        cur.execute("""SELECT id, email, gender, bio, match_preference, birth_date,
+                              orientation, seeking_gender FROM users ORDER BY id""")
         rows = [dict(r) for r in cur.fetchall()]
 
     updated = 0
@@ -77,9 +112,17 @@ def backfill_demo_text():
             continue
         slot = int(re.search(r"\d+", row["email"]).group())
         bio, expectation = _profile_for(slot, row["gender"])
-        if row["bio"] == bio and row["match_preference"] == expectation:
+        chosen, seeking = _orientation_for(slot, row["gender"])
+        wanted = {
+            "bio": bio,
+            "match_preference": expectation,
+            "birth_date": _birth_date_for(slot),
+            "orientation": chosen,
+            "seeking_gender": seeking,
+        }
+        if all(row.get(key) == value for key, value in wanted.items()):
             continue
-        db.update_user(row["id"], {"bio": bio, "match_preference": expectation})
+        db.update_user(row["id"], wanted)
         updated += 1
     return updated
 
@@ -131,9 +174,9 @@ def main(spare_per_gender=4):
         if made_here < need:
             print(f"  ⚠️  {gender} 备用名字不够，还差 {need - made_here} 个（请在 SPARE_NAMES 里加名字）")
 
-    refreshed = backfill_demo_text()
+    refreshed = backfill_demo_profiles()
     if refreshed:
-        print(f"  ↻ 为 {refreshed} 个 demo 账号补写了自我介绍和期待（真实用户不动）")
+        print(f"  ↻ 为 {refreshed} 个 demo 账号补写了介绍/期待/出生日期/性取向（真实用户不动）")
 
     men, women = matchable_counts()
     print(f"\n新增 {created} 人，现在可匹配：男 {men} / 女 {women}")

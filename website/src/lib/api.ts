@@ -67,13 +67,21 @@ async function request(path: string, options: RequestInit = {}) {
 }
 
 export const api = {
-  register: (body: { email: string; password: string; gender: "男" | "女"; wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string }) =>
+  register: (body: {
+    email: string; password: string; gender: "男" | "女";
+    birthDate?: string; orientation?: string; seekingGender?: "男" | "女";
+    wechat?: string; instagram?: string; xiaohongshu?: string; linkedin?: string;
+  }) =>
     request("/api/register", { method: "POST", body: JSON.stringify(body) }),
   login: (body: { email: string; password: string }) =>
     request("/api/login", { method: "POST", body: JSON.stringify(body) }),
   logout: () => request("/api/logout", { method: "POST" }),
   me: () => request("/api/me"),
-  updateMe: (body: { status?: string; bio?: string; matchPreference?: string }) =>
+  updateMe: (body: {
+    status?: string; bio?: string; matchPreference?: string;
+    birthDate?: string; orientation?: string; seekingGender?: "男" | "女";
+    preferredAgeMin?: number | null; preferredAgeMax?: number | null;
+  }) =>
     request("/api/me", { method: "PATCH", body: JSON.stringify(body) }),
   uploadPhoto: (file: File) => {
     const form = new FormData();

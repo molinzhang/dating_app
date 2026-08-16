@@ -14,17 +14,24 @@ with — and, as a side effect, that no one is assigned to more than one
 partner.
 
 Gale-Shapley's stability proof requires a two-sided market (classically
-"men propose, women receive"). Every user has a `gender` ("男"/"女"),
-assumed heterosexual by default, so `_split_into_groups` splits the
-eligible pool along that real line: 男 propose, 女 receive.
+"men propose, women receive"), so the eligible pool is first split into
+independent pools by orientation (see orientation.py). The opposite-gender pool
+is bipartite and uses Gale-Shapley; same-gender pools have no proposer/receiver
+split and use greedy weight-descending pairing instead, which produces a valid
+matching but carries no stability guarantee — the stable *roommates* problem is
+not merely harder than stable marriage, it can have no stable solution at all.
 
 On top of the questionnaire, each person's free-text "对 TA 的期待" is compared
 against candidates' bios (see text_match) and folded in as a minority share of
 the ranking score. It only reorders candidates — it is never a filter, so no
 one is excluded for writing nothing.
+
+Hard filters (per-question side preferences, age range, dislikes) are applied
+symmetrically and drop candidates from both sides' lists.
 """
 from datetime import datetime, timedelta, timezone
 
+import orientation
 import text_match
 from questionnaire_config import VALUE_DIMENSIONS, ALL_QUESTION_IDS, SPECTRUM_MIN, SPECTRUM_MAX
 
@@ -108,6 +115,11 @@ def pair_score(user_a, user_b, text_index=None):
 
 
 def _split_into_groups(eligible_users):
+    """Proposers and receivers for the bipartite (opposite-gender) pool.
+
+    Only ever called with that pool, where 男 all seek 女 and vice versa, so the
+    gender line is also the proposer/receiver line.
+    """
     proposers = [u for u in eligible_users if u["gender"] == "男"]
     receivers = [u for u in eligible_users if u["gender"] == "女"]
     return proposers, receivers
@@ -185,16 +197,19 @@ def accepts(viewer_answers, viewer_preferences, other_answers):
     return True
 
 
-def mutually_acceptable(user_a, user_b):
-    """Both sides' hard filters must pass — a pair survives only if each
-    accepts the other."""
+def mutually_acceptable(user_a, user_b, today=None):
+    """Every hard filter, both directions. A pair survives only if each accepts
+    the other on gender sought, age, and per-question side preferences."""
     return (
-        accepts(user_a["answers"], user_a.get("match_preferences"), user_b["answers"])
+        orientation.mutually_interested(user_a, user_b)
+        and orientation.accepts_age(user_a, user_b, today)
+        and orientation.accepts_age(user_b, user_a, today)
+        and accepts(user_a["answers"], user_a.get("match_preferences"), user_b["answers"])
         and accepts(user_b["answers"], user_b.get("match_preferences"), user_a["answers"])
     )
 
 
-def _preference_order(viewer, candidates, exclusions, text_index=None):
+def _preference_order(viewer, candidates, exclusions, text_index=None, today=None):
     """Rank candidates for viewer, most-preferred first, dropping anyone either
     side has permanently excluded or whose per-question hard filters fail.
 
@@ -213,13 +228,13 @@ def _preference_order(viewer, candidates, exclusions, text_index=None):
     scored = [
         (preference_score(viewer, c, text_index), c["id"])
         for c in candidates
-        if c["id"] not in blocked and mutually_acceptable(viewer, c)
+        if c["id"] not in blocked and mutually_acceptable(viewer, c, today)
     ]
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [uid for _, uid in scored]
 
 
-def gale_shapley_matching(eligible_users, exclusions=None, text_index=None):
+def gale_shapley_matching(eligible_users, exclusions=None, text_index=None, today=None):
     """eligible_users: list of dicts with 'id', 'answers', 'important_question_ids',
     and optionally 'bio'/'match_preference' for the free-text signal.
     exclusions: optional {user_id: set(user_id)} of mutually-excluded pairs,
@@ -239,9 +254,9 @@ def gale_shapley_matching(eligible_users, exclusions=None, text_index=None):
         return []
 
     by_id = {u["id"]: u for u in eligible_users}
-    proposer_prefs = {p["id"]: _preference_order(p, receivers, exclusions, text_index) for p in proposers}
+    proposer_prefs = {p["id"]: _preference_order(p, receivers, exclusions, text_index, today) for p in proposers}
     receiver_rank = {
-        r["id"]: {pid: rank for rank, pid in enumerate(_preference_order(r, proposers, exclusions, text_index))}
+        r["id"]: {pid: rank for rank, pid in enumerate(_preference_order(r, proposers, exclusions, text_index, today))}
         for r in receivers
     }
 
@@ -268,6 +283,77 @@ def gale_shapley_matching(eligible_users, exclusions=None, text_index=None):
             free_proposers.append(pid)
 
     return [(pid, rid, pair_score(by_id[pid], by_id[rid], text_index)) for rid, pid in engaged.items()]
+
+
+def greedy_pairing(eligible_users, exclusions=None, text_index=None, today=None):
+    """Pair a same-gender pool by taking the best mutually-acceptable pair
+    still available, repeatedly.
+
+    Gale-Shapley cannot be used here. With everyone seeking the same gender
+    there is no proposer/receiver split to run the propose-reject loop across;
+    this is the stable *roommates* problem, which unlike stable marriage is not
+    guaranteed to have a stable solution at all. So this makes no stability
+    claim: it returns a maximal matching that is greedy on the symmetric pair
+    score (a 1/2-approximation of the maximum-weight matching). Two people
+    could in principle both prefer each other over who they got.
+
+    Ties break on user id so the same pool always produces the same pairing —
+    otherwise dict ordering would reshuffle recommendations between runs.
+    """
+    exclusions = exclusions or {}
+    if text_index is None:
+        text_index = build_text_index(eligible_users)
+
+    candidates = []
+    for index, user_a in enumerate(eligible_users):
+        blocked = exclusions.get(user_a["id"], frozenset())
+        for user_b in eligible_users[index + 1:]:
+            if user_b["id"] in blocked:
+                continue
+            if not mutually_acceptable(user_a, user_b, today):
+                continue
+            candidates.append((pair_score(user_a, user_b, text_index), user_a["id"], user_b["id"]))
+
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    taken = set()
+    matches = []
+    for score, a_id, b_id in candidates:
+        if a_id in taken or b_id in taken:
+            continue
+        taken.add(a_id)
+        taken.add(b_id)
+        matches.append((a_id, b_id, score))
+    return matches
+
+
+def generate_matches(eligible_users, exclusions=None, text_index=None, today=None):
+    """Match the whole eligible pool, one independent pool at a time.
+
+    The pools are disjoint (see orientation.split_into_pools), so nobody can be
+    matched twice, and a shortage on one side of one pool cannot leave people in
+    another pool unmatched.
+
+    The text index is built once across *everyone* rather than per pool: IDF
+    describes how distinctive a word is among people writing bios, which does
+    not depend on who is eligible to match whom, and a per-pool index would
+    score the same two bios differently depending on pool size.
+    """
+    exclusions = exclusions or {}
+    if text_index is None:
+        text_index = build_text_index(eligible_users)
+
+    matches = []
+    for (kind, _gender), members in sorted(
+        orientation.split_into_pools(eligible_users).items(),
+        key=lambda item: (item[0][0], item[0][1] or ""),
+    ):
+        if len(members) < 2:
+            continue  # nobody to pair with
+        if kind == "same":
+            matches.extend(greedy_pairing(members, exclusions, text_index, today))
+        else:
+            matches.extend(gale_shapley_matching(members, exclusions, text_index, today))
+    return matches
 
 
 def dimension_comparisons(user_a_answers, user_b_answers):

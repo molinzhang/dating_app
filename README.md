@@ -1,6 +1,8 @@
 # dating_app
 
-校友价值观匹配产品原型（Common Ground）。用 24 题价值观问卷 + Gale-Shapley 稳定匹配，每周为用户推荐一位对象。
+校友价值观匹配产品原型（Common Ground）。用 24 题价值观问卷 + 稳定匹配，每周为用户推荐一位对象。
+
+匹配池按性取向拆成三个互不重叠的池子：异性池用 Gale-Shapley 稳定匹配，两个同性池用贪心配对（同性场景是 stable roommates 问题，不保证存在稳定解）。
 
 线上环境：<https://dating-app-khaki-three.vercel.app>
 
@@ -9,8 +11,9 @@
 - `backend/`：FastAPI 后端 + 匹配算法（Postgres / Supabase）
   - `main.py` 接口层，`matching.py` Gale-Shapley 与逐题硬筛选，`db.py` 数据访问，`auth.py` 密码与会话
   - `text_match.py` 自我介绍 ↔ 期待的中文文本匹配（字符 n-gram TF-IDF，纯标准库）
+  - `orientation.py` 性取向分池与年龄硬筛选
   - `questionnaire_config.py` 24 题、5 个阶段、7 个价值维度的定义
-  - 测试：`python3 test_text_match.py`、`python3 test_matching_text.py`（无需 pytest）
+  - 测试：`python3 test_text_match.py`、`python3 test_matching_text.py`、`python3 test_orientation.py`（无需 pytest）
 - `website/`：Vite + React + shadcn 前端
 - `docs/`：交接说明与待办清单
 - `gale_shapley_slides.md`：匹配算法讲解

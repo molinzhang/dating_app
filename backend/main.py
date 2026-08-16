@@ -11,6 +11,7 @@ from pydantic import BaseModel, EmailStr
 import auth
 import db
 import matching
+import orientation
 from questionnaire_config import ALL_QUESTION_IDS
 
 ALLOWED_PHOTO_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -73,6 +74,14 @@ def serialize_user(user_row, photo_version=_UNSET):
         "photoUrl": _photo_url(user_id, photo_version),
         "bio": user_row.get("bio"),
         "matchPreference": user_row.get("match_preference"),
+        "birthDate": user_row.get("birth_date"),
+        # Derived, not stored: an age column would be wrong the day after it
+        # was written.
+        "age": orientation.age_from_birth_date(user_row.get("birth_date")),
+        "orientation": orientation.orientation_of(user_row),
+        "seekingGender": orientation.seeking_of(user_row),
+        "preferredAgeMin": user_row.get("preferred_age_min"),
+        "preferredAgeMax": user_row.get("preferred_age_max"),
     }
 
 
@@ -158,19 +167,74 @@ def get_current_user(authorization: Optional[str] = Header(None)):
 
 # ===================================================== weekly match cycle ==
 
-def _needs_repair(eligible_ids, responses, cycle):
+def _needs_repair(eligible, responses, cycle):
     """Whether the pool has to be re-paired against the given cycle."""
     if cycle is None:
         return True
+    eligible_ids = {u["id"] for u in eligible}
     if not eligible_ids <= db.get_cycle_participants(cycle["id"]):
         return True  # somebody new became eligible
-    # Everyone is accounted for, but a retake since the cycle was generated has
-    # to re-run pairing or the new answers/preferences silently do nothing.
-    newest = max(
-        (responses[uid]["completed_at"] for uid in eligible_ids if responses[uid].get("completed_at")),
-        default=None,
-    )
+    # Everyone is accounted for, but a change since the cycle was generated has
+    # to re-run pairing or the new answers/preferences silently do nothing. Two
+    # kinds count: a questionnaire retake, and an orientation/age edit (which
+    # can move someone into a different pool entirely).
+    stamps = [responses[uid]["completed_at"] for uid in eligible_ids
+              if responses[uid].get("completed_at")]
+    stamps += [u["matching_profile_updated_at"] for u in eligible
+               if u.get("matching_profile_updated_at")]
+    newest = max(stamps, default=None)
     return newest is not None and newest > cycle["generated_at"]
+
+
+def normalize_matching_profile(body, gender):
+    """Validate the orientation/age fields and map them to column names.
+
+    Returns only the keys the caller actually supplied, so a PATCH that touches
+    just the bio does not blank out someone's age preference.
+    """
+    fields = {}
+
+    if body.birthDate is not None:
+        age = orientation.age_from_birth_date(body.birthDate)
+        if age is None:
+            raise HTTPException(status_code=400, detail="出生日期格式应为 YYYY-MM-DD")
+        if age < orientation.MIN_AGE:
+            raise HTTPException(status_code=400, detail=f"须满 {orientation.MIN_AGE} 岁")
+        if age > orientation.MAX_AGE:
+            raise HTTPException(status_code=400, detail="请检查出生日期")
+        fields["birth_date"] = body.birthDate[:10]
+
+    if body.preferredAgeMin is not None or body.preferredAgeMax is not None:
+        if not orientation.valid_age_range(body.preferredAgeMin, body.preferredAgeMax):
+            raise HTTPException(
+                status_code=400,
+                detail=f"年龄范围需在 {orientation.MIN_AGE}-{orientation.MAX_AGE} 之间，且下限不大于上限",
+            )
+        if body.preferredAgeMin is not None:
+            fields["preferred_age_min"] = body.preferredAgeMin
+        if body.preferredAgeMax is not None:
+            fields["preferred_age_max"] = body.preferredAgeMax
+
+    # Orientation and seeking must agree with each other and with the user's own
+    # gender: a "straight 男 seeking 男" row would silently land in the wrong
+    # pool, so it is rejected rather than coerced.
+    if body.orientation is not None or body.seekingGender is not None:
+        chosen = body.orientation or orientation.STRAIGHT
+        if body.seekingGender is not None:
+            seeking = body.seekingGender
+        elif chosen == orientation.GAY:
+            seeking = gender
+        else:
+            seeking = orientation.opposite_gender(gender)
+        if not orientation.orientation_allows(chosen, gender, seeking):
+            raise HTTPException(
+                status_code=400,
+                detail="性取向与希望匹配的性别不一致（异性恋须选异性，同性恋须选同性；双性恋每轮只能选一个）",
+            )
+        fields["orientation"] = chosen
+        fields["seeking_gender"] = seeking
+
+    return fields
 
 
 def _collect_eligible():
@@ -184,6 +248,13 @@ def _collect_eligible():
             # absent text just means no text signal for that person.
             "bio": u.get("bio"),
             "match_preference": u.get("match_preference"),
+            # Pool assignment and the age hard filter.
+            "orientation": u.get("orientation"),
+            "seeking_gender": u.get("seeking_gender"),
+            "birth_date": u.get("birth_date"),
+            "preferred_age_min": u.get("preferred_age_min"),
+            "preferred_age_max": u.get("preferred_age_max"),
+            "matching_profile_updated_at": u.get("matching_profile_updated_at"),
             "answers": responses[u["id"]]["answers"],
             "match_preferences": responses[u["id"]]["match_preferences"],
             "important_question_ids": responses[u["id"]]["important_question_ids"],
@@ -210,7 +281,7 @@ def maybe_regenerate_weekly_matches():
     if len(eligible) < 2:
         return
     eligible_ids = {u["id"] for u in eligible}
-    if not _needs_repair(eligible_ids, responses, db.get_active_cycle(now_str)):
+    if not _needs_repair(eligible, responses, db.get_active_cycle(now_str)):
         return  # cheap check before reaching for the lock
 
     with db.try_pairing_lock() as acquired:
@@ -223,11 +294,11 @@ def maybe_regenerate_weekly_matches():
             return
         eligible_ids = {u["id"] for u in eligible}
         cycle = db.get_active_cycle(now_str)
-        if not _needs_repair(eligible_ids, responses, cycle):
+        if not _needs_repair(eligible, responses, cycle):
             return
 
         text_index = matching.build_text_index(eligible)
-        assignments = matching.gale_shapley_matching(
+        assignments = matching.generate_matches(
             eligible, matching.build_exclusions(db.get_dislike_pairs()), text_index
         )
         # A mid-cycle re-pair keeps the current week's deadline. Starting a
@@ -279,6 +350,13 @@ def get_fresh_match_for(user_id):
     partner = db.get_user_by_id(match_row["matched_user_id"])
     if partner is None or partner["status"] != "active":
         return None
+    # And if either side changed orientation after being paired, this row now
+    # crosses a pool boundary. Re-pairing normally fixes it, but that can be
+    # skipped when another request holds the pairing lock, so don't serve a
+    # recommendation neither person asked for in the meantime.
+    viewer = db.get_user_by_id(user_id)
+    if not orientation.mutually_interested(viewer, partner):
+        return None
     return match_row
 
 
@@ -291,7 +369,21 @@ class ContactFields(BaseModel):
     linkedin: Optional[str] = None
 
 
-class RegisterBody(ContactFields):
+class MatchingProfileFields(BaseModel):
+    """Orientation and age fields, shared by register and profile update.
+
+    All optional: leaving them out keeps the account in the opposite-gender
+    pool with no age preference, which is how every account behaved before
+    these fields existed.
+    """
+    birthDate: Optional[str] = None
+    orientation: Optional[Literal["straight", "gay", "bisexual"]] = None
+    seekingGender: Optional[Literal["男", "女"]] = None
+    preferredAgeMin: Optional[int] = None
+    preferredAgeMax: Optional[int] = None
+
+
+class RegisterBody(ContactFields, MatchingProfileFields):
     email: EmailStr
     password: str
     gender: Literal["男", "女"]
@@ -342,7 +434,10 @@ def register(body: RegisterBody):
         raise HTTPException(status_code=400, detail="密码至少需要8位")
     password_hash, salt = auth.hash_password(body.password)
     display_name = body.email.split("@")[0]
-    user_id = db.create_user(body.email, password_hash, salt, display_name, body.gender, body.model_dump())
+    profile = normalize_matching_profile(body, body.gender)
+    user_id = db.create_user(
+        body.email, password_hash, salt, display_name, body.gender, body.model_dump(), profile
+    )
     token = auth.new_session_token()
     db.create_session(token, user_id)
     payload = _bootstrap_payload(db.get_user_by_id(user_id))
@@ -374,7 +469,7 @@ def me(user=Depends(get_current_user)):
 
 # =================================================================== user ==
 
-class UpdateMeBody(BaseModel):
+class UpdateMeBody(MatchingProfileFields):
     status: Optional[str] = None
     bio: Optional[str] = None
     matchPreference: Optional[str] = None
@@ -391,8 +486,19 @@ def update_me(body: UpdateMeBody, user=Depends(get_current_user)):
         fields["bio"] = body.bio
     if body.matchPreference is not None:
         fields["match_preference"] = body.matchPreference
+    fields.update(normalize_matching_profile(body, user["gender"]))
+    # Orientation moves someone between pools and an age range changes who is
+    # even eligible, so both have to re-pair rather than wait a week — otherwise
+    # the change silently does nothing until the next refresh.
+    repairs_pool = bool({"orientation", "seeking_gender", "birth_date",
+                         "preferred_age_min", "preferred_age_max"} & fields.keys())
+    if repairs_pool:
+        # Stamped rather than only passing force=True below: if another request
+        # holds the pairing lock right now this one returns without pairing, and
+        # without a persisted marker the change would never re-pair at all.
+        fields["matching_profile_updated_at"] = datetime.now(timezone.utc).isoformat()
     db.update_user(user["id"], fields)
-    if fields.get("status") == "active":
+    if fields.get("status") == "active" or repairs_pool:
         maybe_regenerate_weekly_matches()
     return serialize_user(db.get_user_by_id(user["id"]))
 
