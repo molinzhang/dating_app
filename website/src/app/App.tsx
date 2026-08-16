@@ -324,7 +324,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     setWeeklyMatch(null);
     setMatchState(null);
     const queryReturnTo = new URLSearchParams(location.search).get("returnTo");
-    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/dashboard");
+    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/home");
     routerNavigate(nextRoute);
   }, [location.search, routerNavigate]);
 
@@ -353,8 +353,11 @@ function AppProvider({ children }: { children: React.ReactNode }) {
       setToken(payload.token);
       applyBootstrap(payload);
       const returnTo = new URLSearchParams(window.location.search).get("returnTo");
-      const suffix = returnTo?.startsWith("/events/") ? `&returnTo=${encodeURIComponent(returnTo)}` : "";
-      routerNavigate(`/profile?onboarding=1${suffix}`);
+      // Same destination rule as login. Previously this went to
+      // /profile?onboarding=1, but V2 owns /profile and runs on mock data, so a
+      // brand-new account landed in the demo instead of its own real account.
+      // /dashboard shows the "start the questionnaire" CTA, the actual next step.
+      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/dashboard");
       return null;
     } catch (e) {
       return e instanceof ApiError ? e.message : "注册失败，请稍后再试";
