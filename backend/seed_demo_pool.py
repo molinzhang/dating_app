@@ -122,6 +122,12 @@ def backfill_demo_profiles():
         }
         if all(row.get(key) == value for key, value in wanted.items()):
             continue
+        # Orientation and birth date decide which pool someone lands in, so the
+        # seeder has to stamp them exactly like the API does. Without this the
+        # pairing run sees no reason to re-pair, the live cycle keeps everyone in
+        # the pool they were in before, and the newly gay demo accounts just show
+        # "no match" (get_fresh_match_for drops the now cross-pool row).
+        wanted["matching_profile_updated_at"] = db.now_iso()
         db.update_user(row["id"], wanted)
         updated += 1
     return updated

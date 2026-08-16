@@ -745,6 +745,7 @@ function Header() {
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/home")}>首页</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/events")}>活动</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/profile")}>我的资料</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => navigate("/settings")}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/results")}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <div className="relative ml-2">
@@ -801,6 +802,7 @@ function Header() {
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/matches"); setMenuOpen(false); }}>匹配</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/events"); setMenuOpen(false); }}>活动</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/profile"); setMenuOpen(false); }}>我的资料</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => { navigate("/settings"); setMenuOpen(false); }}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/results"); setMenuOpen(false); }}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <Btn variant="ghost" size="sm" onClick={logout} className="text-destructive justify-start">
@@ -2756,10 +2758,38 @@ function MatchDetailPage() {
 // ROUTER
 // ============================================================
 
+/**
+ * The real-backend profile editor.
+ *
+ * V2 owns /profile, but its ProfilePage is backed by demo-service mock data, so
+ * edits there never reach the API. This route exposes the fields that actually
+ * drive matching — bio, expectations, birth date, age range, orientation — until
+ * V2's own profile endpoints exist. `ProfileCard` was previously only rendered by
+ * DashboardPage, which nothing routes to any more, so it was dead code.
+ */
+function MatchSettingsPage() {
+  const { user, updateUser, uploadPhoto, navigate } = useApp();
+  if (!user) return null;
+  return (
+    <div className="max-w-3xl mx-auto px-4 sm:px-6 py-10">
+      <div className="flex items-center gap-3 mb-8">
+        <button onClick={() => navigate("/home")} className="p-2 rounded-xl hover:bg-muted transition-colors">
+          <ChevronLeft size={20}/>
+        </button>
+        <div>
+          <h1 className="text-2xl font-bold" style={{ fontFamily:"'Noto Serif SC', serif" }}>匹配设置</h1>
+          <p className="text-muted-foreground text-sm mt-1">这里改动会直接影响下一次配对。</p>
+        </div>
+      </div>
+      <ProfileCard user={user} onUpdate={updateUser} onUploadPhoto={uploadPhoto}/>
+    </div>
+  );
+}
+
 function Router() {
   const { route } = useApp();
 
-  const protectedRoutes: Route[] = ["/dashboard","/questionnaire","/questionnaire/complete","/results","/results/archive","/matches/current"];
+  const protectedRoutes: Route[] = ["/dashboard","/questionnaire","/questionnaire/complete","/results","/results/archive","/matches/current","/settings"];
   const { user } = useApp();
 
   if (protectedRoutes.includes(route) && !user) {
@@ -2776,6 +2806,7 @@ function Router() {
     "/results": <ResultsPage/>,
     "/results/archive": <ArchivePage/>,
     "/matches/current": <MatchDetailPage/>,
+    "/settings": <MatchSettingsPage/>,
   };
 
   return <>{pages[route]}</>;
