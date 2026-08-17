@@ -1386,6 +1386,21 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
 
   const currentPhoto = resolvePhotoUrl(user.photoUrl);
 
+  const EditableValue = ({ empty, children }: { empty?: boolean; children: React.ReactNode }) => (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      title="点击编辑"
+      className={cn(
+        "group flex w-full items-center gap-2 rounded-lg -mx-2 px-2 py-1 text-left text-sm transition-colors hover:bg-muted/70",
+        empty ? "text-muted-foreground italic" : "text-foreground",
+      )}
+    >
+      <span>{children}</span>
+      <Pencil size={12} className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"/>
+    </button>
+  );
+
   return (
     <div className="bg-card rounded-2xl border border-border p-6 mb-8">
       <div className="flex items-center justify-between mb-5">
@@ -1488,33 +1503,36 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
 
           <div className="border-t border-border pt-5 space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1.5">出生日期</label>
+              <label htmlFor="profile-birth-date" className="block text-sm font-medium mb-1.5">出生日期</label>
               {editing ? (
                 <input
+                  id="profile-birth-date"
                   type="date"
                   value={birthDate}
                   onChange={e => setBirthDate(e.target.value)}
                   className="w-full px-4 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-all"
                 />
               ) : (
-                <p className={cn("text-sm", user.age != null ? "text-foreground" : "text-muted-foreground italic")}>
-                  {user.age != null ? `${user.age} 岁（${user.birthDate}）` : "还没有填写出生日期"}
-                </p>
+                <EditableValue empty={user.age == null}>
+                  {user.age != null ? `${user.age} 岁（${user.birthDate}）` : "还没有填写出生日期，点击填写"}
+                </EditableValue>
               )}
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1.5">期待的年龄段</label>
+              <label id="profile-age-range-label" className="block text-sm font-medium mb-1.5">期待的年龄段</label>
               {editing ? (
                 <>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2" role="group" aria-labelledby="profile-age-range-label">
                     <input
+                      aria-label="年龄下限"
                       type="number" min={18} max={99} inputMode="numeric"
                       value={ageMin} onChange={e => setAgeMin(e.target.value)} placeholder="不限"
                       className="w-24 px-3 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                     />
                     <span className="text-muted-foreground text-sm">到</span>
                     <input
+                      aria-label="年龄上限"
                       type="number" min={18} max={99} inputMode="numeric"
                       value={ageMax} onChange={e => setAgeMax(e.target.value)} placeholder="不限"
                       className="w-24 px-3 py-2.5 rounded-xl border border-border bg-input-background text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring"
@@ -1526,19 +1544,19 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
                   </p>
                 </>
               ) : (
-                <p className={cn("text-sm", (user.preferredAgeMin != null || user.preferredAgeMax != null) ? "text-foreground" : "text-muted-foreground italic")}>
+                <EditableValue empty={user.preferredAgeMin == null && user.preferredAgeMax == null}>
                   {user.preferredAgeMin == null && user.preferredAgeMax == null
-                    ? "不限"
+                    ? "不限，点击设置"
                     : `${user.preferredAgeMin ?? 18} - ${user.preferredAgeMax ?? 99} 岁`}
-                </p>
+                </EditableValue>
               )}
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1.5">性取向</label>
+              <label id="profile-orientation-label" className="block text-sm font-medium mb-1.5">性取向</label>
               {editing ? (
                 <>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2" role="group" aria-labelledby="profile-orientation-label">
                     {(["straight", "gay", "bisexual"] as const).map(o => (
                       <button
                         key={o} type="button"
@@ -1575,12 +1593,12 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
                   </p>
                 </>
               ) : (
-                <p className="text-sm text-foreground">
+                <EditableValue>
                   {ORIENTATION_LABELS[user.orientation ?? "straight"]}
                   <span className="text-muted-foreground">
                     {" "}· 匹配{user.seekingGender ?? oppositeGender(user.gender)}性
                   </span>
-                </p>
+                </EditableValue>
               )}
             </div>
           </div>
