@@ -13,8 +13,6 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "./components/ui/select";
 
-const V2Experience = React.lazy(() => import("../features/v2/V2Experience").then(module => ({ default: module.V2Experience })));
-const GuestEventPreview = React.lazy(() => import("../features/v2/GuestEventPreview").then(module => ({ default: module.GuestEventPreview })));
 
 // ============================================================
 // TYPES
@@ -48,7 +46,7 @@ interface AppUser {
   preferredAgeMax?: number | null;
 }
 
-// Same vocabulary as the backend (orientation.py) and V2 (features/v2/orientation.ts).
+// Same vocabulary as the backend (orientation.py).
 type Orientation = "straight" | "gay" | "bisexual";
 
 interface RegisterData {
@@ -104,19 +102,6 @@ export function ageFromBirthDate(birthDate: string, now: Date = new Date()): num
     (now.getUTCMonth() + 1 === month && now.getUTCDate() >= day);
   return now.getUTCFullYear() - year - (hadBirthday ? 0 : 1);
 }
-
-const V2_DEMO_MODE = (import.meta as any).env?.VITE_DATING_SERVICE_MODE !== "api";
-const V2_DEMO_SESSION_KEY = "cg_v2_demo_session";
-const V2_DEMO_USER: AppUser = {
-  id: "user-lin-zhixia",
-  displayName: "林知夏",
-  email: "demo@commonground.local",
-  gender: "女",
-  status: "active",
-  questionnaireStatus: "completed",
-  createdAt: "2025-08-11T12:00:00.000Z",
-  bio: "喜欢城市散步、独立书店和认真但不紧绷的对话。",
-};
 
 interface QuestionnaireResponse {
   id: string; version: number;
@@ -242,7 +227,6 @@ interface AppCtx {
   matchState: MatchState | null;
   booting: boolean;
   navigate: (r: Route) => void;
-  enterDemo: (destination?: Route) => void;
   login: (email: string, pw: string) => Promise<string | null>;
   register: (data: RegisterData) => Promise<string | null>;
   logout: () => void;
@@ -280,7 +264,6 @@ function AppProvider({ children }: { children: React.ReactNode }) {
 
   const clearSession = useCallback(() => {
     setToken(null);
-    localStorage.removeItem(V2_DEMO_SESSION_KEY);
     setUser(null); setQuestionnaire(null); setArchived([]); setWeeklyMatch(null); setMatchState(null);
   }, []);
 
@@ -295,9 +278,6 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   // Restore session from a stored token on first load.
   useEffect(() => {
     if (!getToken()) {
-      if (V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1") {
-        setUser({ ...V2_DEMO_USER });
-      }
       setBooting(false);
       return;
     }
@@ -305,7 +285,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   }, [refreshMe]);
 
   const navigate = useCallback((r: Route) => {
-    const protectedRoutes = ["/dashboard", "/home", "/profile", "/matches", "/questionnaire", "/questionnaire/complete", "/results", "/results/archive", "/matches/current"];
+    const protectedRoutes = ["/dashboard", "/settings", "/questionnaire", "/questionnaire/complete", "/results", "/results/archive", "/matches/current"];
     if (protectedRoutes.some(path => r === path || r.startsWith(`${path}/`)) && !user) {
       routerNavigate("/login");
       return;
@@ -314,28 +294,12 @@ function AppProvider({ children }: { children: React.ReactNode }) {
     window.scrollTo(0,0);
   }, [routerNavigate, user]);
 
-  const enterDemo = useCallback((destination?: Route) => {
-    if (!V2_DEMO_MODE) return;
-    setToken(null);
-    localStorage.setItem(V2_DEMO_SESSION_KEY, "1");
-    setUser({ ...V2_DEMO_USER });
-    setQuestionnaire(null);
-    setArchived([]);
-    setWeeklyMatch(null);
-    setMatchState(null);
-    const queryReturnTo = new URLSearchParams(location.search).get("returnTo");
-    const nextRoute = destination ?? (queryReturnTo?.startsWith("/events/") ? queryReturnTo : "/home");
-    routerNavigate(nextRoute);
-  }, [location.search, routerNavigate]);
-
   const login = useCallback(async (email: string, password: string): Promise<string | null> => {
     try {
       const payload = await api.login({ email, password });
-      localStorage.removeItem(V2_DEMO_SESSION_KEY);
       setToken(payload.token);
       applyBootstrap(payload);
-      const returnTo = new URLSearchParams(window.location.search).get("returnTo");
-      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/dashboard");
+      routerNavigate("/dashboard");
       return null;
     } catch (e) {
       // Distinguish wrong credentials from the server being unreachable —
@@ -349,15 +313,11 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   const register = useCallback(async (data: RegisterData): Promise<string | null> => {
     try {
       const payload = await api.register(data);
-      localStorage.removeItem(V2_DEMO_SESSION_KEY);
       setToken(payload.token);
       applyBootstrap(payload);
-      const returnTo = new URLSearchParams(window.location.search).get("returnTo");
-      // Same destination rule as login. Previously this went to
-      // /profile?onboarding=1, but V2 owns /profile and runs on mock data, so a
-      // brand-new account landed in the demo instead of its own real account.
-      // /dashboard shows the "start the questionnaire" CTA, the actual next step.
-      routerNavigate(returnTo?.startsWith("/events/") ? returnTo : "/dashboard");
+      // New accounts land on the dashboard, which shows the "start the
+      // questionnaire" call to action — the actual next step.
+      routerNavigate("/dashboard");
       return null;
     } catch (e) {
       return e instanceof ApiError ? e.message : "注册失败，请稍后再试";
@@ -365,16 +325,12 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   }, [applyBootstrap, routerNavigate]);
 
   const logout = useCallback(() => {
-    if (!(V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1")) api.logout().catch(() => {});
+    api.logout().catch(() => {});
     clearSession();
     routerNavigate("/");
   }, [clearSession, routerNavigate]);
 
   const updateUser = useCallback(async (updates: Partial<AppUser>) => {
-    if (V2_DEMO_MODE && localStorage.getItem(V2_DEMO_SESSION_KEY) === "1") {
-      setUser(current => current ? { ...current, ...updates } : current);
-      return;
-    }
     const backendFields: {
       status?: string; bio?: string; matchPreference?: string;
       birthDate?: string; orientation?: Orientation; seekingGender?: "男" | "女";
@@ -486,7 +442,7 @@ function AppProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={{
       route, user, questionnaire, archivedQuestionnaires, weeklyMatch, matchState, booting,
-      navigate, enterDemo, login, register, logout, updateUser, uploadPhoto,
+      navigate, login, register, logout, updateUser, uploadPhoto,
       saveAnswers, submitQuestionnaire, retakeQuestionnaire, refreshMatch,
       updateMatchResponse, dislikeMatch,
     }}>
@@ -746,9 +702,7 @@ function Header() {
             {user ? (
               <>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/dashboard")}>首页</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/events")}>活动</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/settings")}>我的资料</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => navigate("/settings")}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => navigate("/results")}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <div className="relative ml-2">
@@ -802,10 +756,7 @@ function Header() {
                   </div>
                 </div>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/dashboard"); setMenuOpen(false); }}>首页</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/matches"); setMenuOpen(false); }}>匹配</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/events"); setMenuOpen(false); }}>活动</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/settings"); setMenuOpen(false); }}>我的资料</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => { navigate("/settings"); setMenuOpen(false); }}>匹配设置</Btn>
                 <Btn variant="ghost" size="sm" onClick={() => { navigate("/results"); setMenuOpen(false); }}>问卷结果</Btn>
                 <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
                 <Btn variant="ghost" size="sm" onClick={logout} className="text-destructive justify-start">
@@ -937,7 +888,7 @@ function ValueSpectrumViz({ userAnswers, matchAnswers, size = 320 }: {
 // ============================================================
 
 function LandingPage() {
-  const { navigate, user, enterDemo } = useApp();
+  const { navigate, user } = useApp();
   const DIMENSIONS_PREVIEW = ["探索与稳定","独立与联结","成就与生活","金钱与体验","公平与责任","信任与能动性","沟通与亲密"];
 
   // Send signed-in visitors to wherever they actually left off, rather than
@@ -973,7 +924,6 @@ function LandingPage() {
             <div className="flex flex-wrap gap-3">
               <Btn size="lg" onClick={() => navigate("/register")}>开始探索 <ArrowRight size={20}/></Btn>
               <Btn variant="secondary" size="lg" onClick={() => navigate("/login")}>登录</Btn>
-              {V2_DEMO_MODE ? <Btn variant="ghost" size="lg" onClick={() => enterDemo("/home")}>直接体验演示</Btn> : null}
             </div>
           )}
         </div>
@@ -1052,22 +1002,22 @@ function LandingPage() {
       <section className="bg-[#201B17] py-16 text-white">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="max-w-2xl mb-10">
-            <p className="text-sm font-medium text-orange-300 tracking-wide uppercase mb-3">两种相遇方式</p>
-            <h2 className="text-3xl font-bold mb-4" style={{ fontFamily:"'Noto Serif SC', serif" }}>认真等待，也可以主动创造一个场合</h2>
-            <p className="text-white/65 leading-relaxed">每周推荐适合稳定探索；活动匹配则把一群有共同场景的人放进独立小池，在报名截止后完成一次匹配。</p>
+            <p className="text-sm font-medium text-orange-300 tracking-wide uppercase mb-3">每周一位</p>
+            <h2 className="text-3xl font-bold mb-4" style={{ fontFamily:"'Noto Serif SC', serif" }}>不刷人，一周只认真看一个人</h2>
+            <p className="text-white/65 leading-relaxed">填完价值观问卷，设定你的必要条件，每周收到一位双向满足条件的推荐——附带 7 个维度的对比，告诉你你们在哪里接近、哪里值得聊。</p>
           </div>
           <div className="grid md:grid-cols-2 gap-5">
             <div className="rounded-3xl border border-white/10 bg-white/5 p-7">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-orange-400/15 text-orange-300"><Sparkles size={24}/></div>
-              <h3 className="mt-5 text-xl font-semibold">每周推荐</h3>
-              <p className="mt-2 text-sm leading-6 text-white/60">完善资料和价值观问卷后，每周收到一位双向满足必要条件的推荐。</p>
-              <Btn variant="secondary" className="mt-6" onClick={() => navigate(user ? "/matches" : "/register")}>查看匹配方式 <ArrowRight size={17}/></Btn>
+              <h3 className="mt-5 text-xl font-semibold">先了解自己</h3>
+              <p className="mt-2 text-sm leading-6 text-white/60">24 道题、7 个价值维度。你可以标出最在意的 3-5 题，它们在匹配时权重更高。</p>
+              <Btn variant="secondary" className="mt-6" onClick={() => navigate(user ? "/results" : "/register")}>{user ? "查看我的结果" : "开始问卷"} <ArrowRight size={17}/></Btn>
             </div>
             <div className="rounded-3xl border border-white/10 bg-white/5 p-7">
               <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-violet-400/15 text-violet-300"><Heart size={24}/></div>
-              <h3 className="mt-5 text-xl font-semibold">活动匹配</h3>
-              <p className="mt-2 text-sm leading-6 text-white/60">报名公开或私密活动，为本场单独调整条件；主办方结束报名后手动运行一次匹配。</p>
-              <Btn variant="secondary" className="mt-6" onClick={() => user ? navigate("/events") : V2_DEMO_MODE ? enterDemo("/events") : navigate("/register")}>{user ? "探索活动" : V2_DEMO_MODE ? "体验活动演示" : "探索活动"} <ArrowRight size={17}/></Btn>
+              <h3 className="mt-5 text-xl font-semibold">再遇见对的人</h3>
+              <p className="mt-2 text-sm leading-6 text-white/60">稳定匹配算法保证不会出现「两个人都更想要对方却没配上」。年龄、性取向和逐题要求都是双向硬条件。</p>
+              <Btn variant="secondary" className="mt-6" onClick={() => navigate(user ? "/dashboard" : "/register")}>{user ? "看本周推荐" : "免费注册"} <ArrowRight size={17}/></Btn>
             </div>
           </div>
         </div>
@@ -1320,7 +1270,7 @@ function RegisterPage() {
 }
 
 function LoginPage() {
-  const { navigate, login, enterDemo } = useApp();
+  const { navigate, login } = useApp();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [remember, setRemember] = useState(false);
@@ -1359,12 +1309,6 @@ function LoginPage() {
             <button type="button" className="text-sm text-primary hover:underline">忘记密码？</button>
           </div>
           <Btn type="submit" className="w-full" size="lg" disabled={submitting}>{submitting ? "登录中…" : "登录"}</Btn>
-          {V2_DEMO_MODE ? (
-            <div className="space-y-2 border-t border-border pt-5">
-              <Btn type="button" variant="secondary" className="w-full" size="lg" onClick={() => enterDemo()}>无需账号，直接体验演示</Btn>
-              <p className="text-center text-xs text-muted-foreground">演示资料和操作只保存在当前浏览器，不会发送给现有后端。</p>
-            </div>
-          ) : null}
           <p className="text-center text-sm text-muted-foreground">
             还没有账号？<button type="button" onClick={() => navigate("/register")} className="text-primary font-medium hover:underline">免费注册</button>
           </p>
@@ -2762,13 +2706,8 @@ function MatchDetailPage() {
 // ============================================================
 
 /**
- * The real-backend profile editor.
- *
- * V2 owns /profile, but its ProfilePage is backed by demo-service mock data, so
- * edits there never reach the API. This route exposes the fields that actually
- * drive matching — bio, expectations, birth date, age range, orientation — until
- * V2's own profile endpoints exist. `ProfileCard` was previously only rendered by
- * DashboardPage, which nothing routes to any more, so it was dead code.
+ * Profile editor: the fields that actually drive matching — bio, what you're
+ * looking for, birth date, age range, orientation.
  */
 function MatchSettingsPage() {
   const { user, updateUser, uploadPhoto, navigate } = useApp();
@@ -2835,40 +2774,8 @@ function AppRouterWrapper() {
   const location = useLocation();
   const isQuestionnaire = route === "/questionnaire";
   const isCompletion = route === "/questionnaire/complete";
-  const isV2Route = route === "/home" || route === "/profile" || route === "/matches" || route.startsWith("/events/") || route === "/events" || (route.startsWith("/matches/") && route !== "/matches/current");
-  const guestEventMatch = route === "/events/new" ? null : route.match(/^\/events\/([^/]+)$/);
-
   if (booting) {
     return <div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">加载中…</div>;
-  }
-
-  if (isV2Route) {
-    if (!user && guestEventMatch) {
-      const returnTo = `${route}${location.search}`;
-      return <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">正在打开活动邀请…</div>}><GuestEventPreview eventId={decodeURIComponent(guestEventMatch[1])} onLogin={() => navigate(`/login?returnTo=${encodeURIComponent(returnTo)}`)} onRegister={() => navigate(`/register?returnTo=${encodeURIComponent(returnTo)}`)} /></React.Suspense>;
-    }
-    if (!user) {
-      const returnTo = `${route}${location.search}`;
-      const loginPath = route.startsWith("/events/") ? `/login?returnTo=${encodeURIComponent(returnTo)}` : "/login";
-      return <Navigate to={loginPath} replace />;
-    }
-    return (
-      <React.Suspense fallback={<div className="min-h-screen flex items-center justify-center text-muted-foreground text-sm">正在准备新的匹配体验…</div>}>
-        <V2Experience
-          fallbackDisplayName={user.displayName}
-          weeklyStatus={user.status}
-          questionnaireStatus={user.questionnaireStatus}
-          weeklyMatch={user.status === "active" ? weeklyMatch : null}
-          nextRefreshDate={weeklyMatch?.nextRefreshDate ?? matchState?.nextRefreshDate}
-          onWeeklyToggle={() => {
-            const nextStatus = user.status === "active" ? "inactive" : "active";
-            void updateUser({ status: nextStatus });
-            toast(nextStatus === "active" ? "每周匹配已开启" : "每周匹配已暂停；活动报名不受影响");
-          }}
-          onLogout={logout}
-        />
-      </React.Suspense>
-    );
   }
 
   return (

@@ -1,5 +1,14 @@
 # 结构化资料、硬性条件与活动匹配：后端接入契约
 
+> **状态（2026-08-17）：这份契约描述的功能已从 `main` 摘除，暂存在分支 `v2-profile-events-experience`。**
+>
+> 摘除原因：它需要的 4 个接口（`/api/me/profile`、`/api/me/match-criteria`、`/api/events`、`/api/matches`）
+> 后端都还没有，所以那套界面在 main 上只能跑 `demo-service.ts` 的假数据——用户注册后会直接掉进演示里。
+>
+> 本文档保留作为**设计参考**，不代表 main 的现状。main 现在的匹配是：24 题价值观问卷 + 逐题硬筛选 +
+> 年龄区间 + 性取向分池 + 自我介绍/期待的文本匹配，见 `backend/matching.py`、`backend/orientation.py`、
+> `backend/text_match.py`。要恢复这套设计，先实现那 4 个接口，再从分支 cherry-pick 前端。
+
 > 文档状态：v1 实现契约
 >
 > 前端 wire 类型权威来源：`website/src/features/v2/domain.ts`
