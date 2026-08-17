@@ -1370,7 +1370,10 @@ function ProfileCard({ user, onUpdate, onUploadPhoto }: { user: AppUser; onUpdat
       preferredAgeMax: max,
     });
     setEditing(false);
-    toast.success("个人资料已保存");
+    toast.success("个人资料已保存", {
+      description: "新的条件会在下一轮配对时生效，本周推荐不会变。",
+      duration: 6000,
+    });
   };
 
   const cancel = () => {
@@ -1779,9 +1782,9 @@ function DashboardPage() {
                     <h2 className="font-semibold">新的推荐正在准备中</h2>
                   </div>
                   <p className="text-muted-foreground text-sm">
-                    推荐每七天更新一次
-                    {matchState?.nextRefreshDate ? `，下一轮将在 ${matchState.nextRefreshDate} 进行` : ""}
-                    。耐心等待，只推荐认真筛选的人。
+                    你的问卷已经进入匹配池，等下一轮配对运行后就会有推荐
+                    {matchState?.nextRefreshDate ? `，本轮有效期到 ${matchState.nextRefreshDate}` : ""}
+                    。只推荐认真筛选的人，宁缺毋滥。
                   </p>
                 </>
               )}

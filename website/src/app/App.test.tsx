@@ -155,6 +155,18 @@ describe("profile fields are reachable", () => {
     await waitFor(() => expect(updateMe).not.toHaveBeenCalled());
   });
 
+  it("says the change applies at the next pairing, not this week", async () => {
+    await signIn();
+    fireEvent.click(screen.getByRole("button", { name: /不限，点击设置/ }));
+    const inputs = await screen.findAllByPlaceholderText("不限");
+    fireEvent.change(inputs[0], { target: { value: "30" } });
+    fireEvent.change(inputs[1], { target: { value: "35" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    // Saving used to re-pair immediately; it no longer does, so the toast has to
+    // say so or the unchanged recommendation reads as a bug.
+    expect(await screen.findByText(/下一轮配对时生效/)).toBeInTheDocument();
+  });
+
   it("saves the age range through the API", async () => {
     await signIn();
     fireEvent.click(screen.getByRole("button", { name: /不限，点击设置/ }));

@@ -48,7 +48,27 @@ pnpm dev
 
 打开 <http://localhost:5173>。
 
-### 3. 造测试数据（可选）
+### 3. 运行配对
+
+**匹配算法只在你手动运行时才跑**，接口里没有任何地方会自动配对。改资料、交问卷只会把池子标记为"有变动"，推荐要等下一次配对才变。
+
+```bash
+cd backend
+./venv/bin/python run_pairing.py            # 立即配对
+./venv/bin/python run_pairing.py --dry-run  # 只看会配成什么，不写库
+./venv/bin/python run_pairing.py --if-dirty # 没有变动就跳过
+```
+
+线上（Render 上没有 shell）用接口触发，需要先在环境变量里设 `ADMIN_TOKEN`：
+
+```bash
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://dating-app-2vcl.onrender.com/api/admin/run-matching
+```
+
+没设 `ADMIN_TOKEN` 时该接口返回 503（失败关闭，不会裸奔）。
+
+### 4. 造测试数据（可选）
 
 匹配需要池子里有人，且 Gale-Shapley 按 `min(男, 女)` 配对，哪边人多哪边就有人落单：
 

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from hmac import compare_digest
 import json
 import os
 from typing import Optional, Literal
@@ -39,10 +40,31 @@ app.add_middleware(
 )
 
 
+# Pairing is an operator action, so the endpoint that triggers it needs its own
+# secret. Unset means disabled rather than open: an unauthenticated endpoint that
+# reshuffles everyone's recommendation is not something to leave on by default.
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "").strip()
+
+
 @app.get("/api/health")
 def health():
     """Liveness probe for the hosting platform."""
     return {"ok": True}
+
+
+@app.post("/api/admin/run-matching")
+def admin_run_matching(force: bool = True, authorization: Optional[str] = Header(None)):
+    """Run pairing now. Nothing else in the API ever pairs.
+
+    force defaults to True because a human triggering this by hand means "pair
+    now"; pass ?force=false to skip when nothing has changed since the last run.
+    """
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="未配置 ADMIN_TOKEN，该接口已禁用")
+    supplied = (authorization or "").removeprefix("Bearer ").strip()
+    if not compare_digest(supplied, ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="管理员令牌不正确")
+    return run_pairing(force=force)
 
 
 # ============================================================ serializers ==
@@ -265,37 +287,39 @@ def _collect_eligible():
     return eligible, responses
 
 
-def maybe_regenerate_weekly_matches():
-    """Lazy weekly refresh: re-pair the WHOLE eligible pool when the cycle has
-    expired, someone new became eligible, or someone retook the questionnaire.
-    The pool therefore converges onto one shared weekly cadence rather than
-    per-user 7-day timers.
+def run_pairing(force=False):
+    """Re-pair the whole eligible pool. Returns a summary dict.
 
-    Runs on nearly every request, so reads are batched — doing them per-user
-    turned a single login into ~29 round trips to a remote DB.
+    Deliberately NOT called from request handlers. Pairing used to run lazily on
+    nearly every request, which meant a profile edit could silently reshuffle
+    everybody's recommendation mid-week. It now only happens when someone asks
+    for it: POST /api/admin/run-matching, or `python run_pairing.py`.
+
+    force=True pairs even when nothing has changed since the last run, which is
+    what an operator triggering it by hand almost always means.
     """
     now = datetime.now(timezone.utc)
     now_str = now.isoformat()
 
     eligible, responses = _collect_eligible()
     if len(eligible) < 2:
-        return
+        return {"paired": 0, "skipped": "fewer than two eligible users"}
     eligible_ids = {u["id"] for u in eligible}
-    if not _needs_repair(eligible, responses, db.get_active_cycle(now_str)):
-        return  # cheap check before reaching for the lock
+    if not force and not _needs_repair(eligible, responses, db.get_active_cycle(now_str)):
+        return {"paired": 0, "skipped": "nothing changed since the last run"}
 
     with db.try_pairing_lock() as acquired:
         if not acquired:
-            return  # another request is already pairing; nothing to add
+            return {"paired": 0, "skipped": "another pairing run holds the lock"}
         # Re-read under the lock: the holder may have just finished, and
         # re-pairing on their result would duplicate the whole cycle.
         eligible, responses = _collect_eligible()
         if len(eligible) < 2:
-            return
+            return {"paired": 0, "skipped": "fewer than two eligible users"}
         eligible_ids = {u["id"] for u in eligible}
         cycle = db.get_active_cycle(now_str)
-        if not _needs_repair(eligible, responses, cycle):
-            return
+        if not force and not _needs_repair(eligible, responses, cycle):
+            return {"paired": 0, "skipped": "nothing changed since the last run"}
 
         text_index = matching.build_text_index(eligible)
         assignments = matching.generate_matches(
@@ -325,7 +349,15 @@ def maybe_regenerate_weekly_matches():
             rows.append((b_id, a_id, summary_b, comparisons_b, now_str, next_refresh_date,
                          previous.get((b_id, a_id), "unseen"),
                          matching.shared_interest_terms(user_b, user_a, text_index)))
-        db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
+        cycle_id = db.record_match_cycle(now_str, next_refresh_date, eligible_ids, rows)
+        return {
+            "cycleId": cycle_id,
+            "eligible": len(eligible),
+            "paired": len(assignments) * 2,
+            "unmatched": len(eligible) - len(assignments) * 2,
+            "nextRefreshDate": next_refresh_date[:10],
+            "generatedAt": now_str,
+        }
 
 
 def get_fresh_match_for(user_id):
@@ -333,11 +365,18 @@ def get_fresh_match_for(user_id):
         # No completed questionnaire right now (e.g. mid-retake) — any
         # leftover weekly_matches row from before is stale, ignore it.
         return None
-    maybe_regenerate_weekly_matches()
-    match_row = db.get_latest_match(user_id)
+    now = datetime.now(timezone.utc)
+    cycle = db.get_active_cycle(now.isoformat())
+    if cycle is None:
+        return None  # no unexpired pairing run to show anything from
+    # Scoped to the current cycle on purpose. "The newest row for this user" is a
+    # different question from "this user's row in the current run": a later run
+    # that left them unmatched writes no row, so the unscoped query kept serving
+    # a superseded recommendation — one that could already violate the filters
+    # the user has since set.
+    match_row = db.get_latest_match(user_id, cycle["id"])
     if match_row is None:
         return None
-    now = datetime.now(timezone.utc)
     if datetime.fromisoformat(match_row["next_refresh_date"]) <= now:
         return None
     # A dislike recorded *after* this week's pairing was generated leaves the
@@ -493,13 +532,10 @@ def update_me(body: UpdateMeBody, user=Depends(get_current_user)):
     repairs_pool = bool({"orientation", "seeking_gender", "birth_date",
                          "preferred_age_min", "preferred_age_max"} & fields.keys())
     if repairs_pool:
-        # Stamped rather than only passing force=True below: if another request
-        # holds the pairing lock right now this one returns without pairing, and
-        # without a persisted marker the change would never re-pair at all.
+        # Marks the pool dirty so the next pairing run knows something changed.
+        # Nothing re-pairs here: the change takes effect when pairing is run.
         fields["matching_profile_updated_at"] = datetime.now(timezone.utc).isoformat()
     db.update_user(user["id"], fields)
-    if fields.get("status") == "active" or repairs_pool:
-        maybe_regenerate_weekly_matches()
     return serialize_user(db.get_user_by_id(user["id"]))
 
 
@@ -607,7 +643,6 @@ def submit_questionnaire(body: SubmitBody, user=Depends(get_current_user)):
         body.matchPreferences or draft["match_preferences"], draft["answers"]
     )
     db.submit_response(draft["id"], body.importantQuestionIds, preferences)
-    maybe_regenerate_weekly_matches()
     return serialize_questionnaire(db.get_response_by_id(draft["id"]))
 
 

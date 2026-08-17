@@ -177,6 +177,11 @@ def init_db():
             recommendation_date TEXT NOT NULL,
             next_refresh_date TEXT NOT NULL,
             response_status TEXT NOT NULL DEFAULT 'unseen',
+            -- Which pairing run produced this row. Without it, a user who was
+            -- matched last run and left out of this one keeps being served the
+            -- superseded row, because "latest row for this user" is not the same
+            -- question as "this user's row in the current cycle".
+            cycle_id INTEGER REFERENCES match_cycles(id),
             -- Words shared between this user's stated expectations and the
             -- match's bio. Frozen at pairing time because the scores are
             -- relative to the pool that was paired: recomputing later, against
@@ -229,7 +234,22 @@ def init_db():
             ADD COLUMN IF NOT EXISTS match_preferences TEXT NOT NULL DEFAULT '{}';
 
         ALTER TABLE weekly_matches
-            ADD COLUMN IF NOT EXISTS shared_interests TEXT NOT NULL DEFAULT '[]';
+            ADD COLUMN IF NOT EXISTS shared_interests TEXT NOT NULL DEFAULT '[]',
+            ADD COLUMN IF NOT EXISTS cycle_id INTEGER REFERENCES match_cycles(id);
+
+        CREATE INDEX IF NOT EXISTS idx_matches_user_cycle
+            ON weekly_matches(user_id, cycle_id);
+
+        -- Backfill cycle_id for rows written before the column existed.
+        -- record_match_cycle used the same timestamp for the cycle and its rows,
+        -- so generated_at identifies them exactly. Without this every existing
+        -- recommendation would stop being served the moment this deploys, since
+        -- serving is now scoped to the current cycle.
+        UPDATE weekly_matches w
+           SET cycle_id = c.id
+          FROM match_cycles c
+         WHERE w.cycle_id IS NULL
+           AND w.recommendation_date = c.generated_at;
 
         ALTER TABLE users
             ADD COLUMN IF NOT EXISTS birth_date TEXT,
@@ -441,27 +461,48 @@ def get_questionnaire_status(user_id):
 
 # --------------------------------------------------------- weekly_matches ----
 
-def get_latest_match(user_id):
+def get_latest_match(user_id, cycle_id=None):
+    """This user's match row, optionally restricted to one pairing run.
+
+    Pass cycle_id whenever the row is going to be shown to someone: without it
+    this returns the newest row ever written for the user, which is a *different*
+    pairing run's answer once a newer run left them unmatched.
+    """
     with _cursor() as cur:
-        cur.execute(
-            "SELECT * FROM weekly_matches WHERE user_id = %s ORDER BY id DESC LIMIT 1",
-            (user_id,),
-        )
+        if cycle_id is None:
+            cur.execute(
+                "SELECT * FROM weekly_matches WHERE user_id = %s ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            )
+        else:
+            cur.execute(
+                """SELECT * FROM weekly_matches WHERE user_id = %s AND cycle_id = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (user_id, cycle_id),
+            )
         row = cur.fetchone()
     return dict(row) if row else None
 
 
-def get_latest_matches_for(user_ids):
+def get_latest_matches_for(user_ids, cycle_id=None):
     """Batched get_latest_match — one query instead of one per user."""
     if not user_ids:
         return {}
     with _cursor() as cur:
-        cur.execute(
-            """SELECT DISTINCT ON (user_id) * FROM weekly_matches
-               WHERE user_id = ANY(%s)
-               ORDER BY user_id, id DESC""",
-            (list(user_ids),),
-        )
+        if cycle_id is None:
+            cur.execute(
+                """SELECT DISTINCT ON (user_id) * FROM weekly_matches
+                   WHERE user_id = ANY(%s)
+                   ORDER BY user_id, id DESC""",
+                (list(user_ids),),
+            )
+        else:
+            cur.execute(
+                """SELECT DISTINCT ON (user_id) * FROM weekly_matches
+                   WHERE user_id = ANY(%s) AND cycle_id = %s
+                   ORDER BY user_id, id DESC""",
+                (list(user_ids), cycle_id),
+            )
         rows = cur.fetchall()
     return {r["user_id"]: dict(r) for r in rows}
 
@@ -585,9 +626,10 @@ def record_match_cycle(generated_at, next_refresh_date, participant_ids, match_r
                 cur,
                 """INSERT INTO weekly_matches (user_id, matched_user_id, compatibility_summary,
                                                 dimension_comparisons, recommendation_date, next_refresh_date,
-                                                response_status, shared_interests)
+                                                response_status, shared_interests, cycle_id)
                    VALUES %s""",
-                [(u, m, summary, json.dumps(c), rd, nrd, st, json.dumps(si, ensure_ascii=False))
+                [(u, m, summary, json.dumps(c), rd, nrd, st,
+                  json.dumps(si, ensure_ascii=False), cycle_id)
                  for u, m, summary, c, rd, nrd, st, si in rows],
             )
         return cycle_id
