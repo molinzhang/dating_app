@@ -180,6 +180,26 @@ describe("profile fields are reachable", () => {
   });
 });
 
+describe("missing birth date", () => {
+  it("warns an account that has none, because age filters silently exclude it", async () => {
+    window.localStorage.setItem("cg_token", "test-token");
+    renderAt("/dashboard");
+    expect(await screen.findByText("请补上出生日期")).toBeInTheDocument();
+    expect(screen.getByText(/匹配不到你/)).toBeInTheDocument();
+  });
+
+  it("does not nag an account that has one", async () => {
+    me.mockImplementation(async () => ({
+      ...ME,
+      user: { ...ME.user, birthDate: "1996-08-16", age: 30 },
+    }));
+    window.localStorage.setItem("cg_token", "test-token");
+    renderAt("/dashboard");
+    await screen.findByText(/你好/);
+    expect(screen.queryByText("请补上出生日期")).not.toBeInTheDocument();
+  });
+});
+
 describe("protected routes", () => {
   it("sends a signed-out visitor to login instead of rendering blank", async () => {
     renderAt("/settings");

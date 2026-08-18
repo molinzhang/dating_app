@@ -4,10 +4,14 @@ Run: ./venv/bin/python seed_fake_data.py
 """
 import random
 
-import db
+import re
+
 import auth
-from main import maybe_regenerate_weekly_matches
+import db
 from questionnaire_config import ALL_QUESTION_IDS
+
+# Only accounts matching this exactly are seeded fixtures the script may rewrite.
+SEED_EMAIL = re.compile(r"^user\d+@example\.com$")
 
 random.seed(7)
 
@@ -88,6 +92,33 @@ def jitter(vec, amount=1):
     return [max(1, min(7, v + random.randint(-amount, amount))) for v in vec]
 
 
+# These fixtures predate the birth-date field, so they had none — which meant
+# every one of them was invisible to anyone who set an age range, and they made
+# up 9 of the 15 dateless accounts in the pool.
+def _birth_date_for(index):
+    return f"{1988 + (index * 3) % 14}-0{1 + index % 9}-1{index % 9}"
+
+
+def backfill_seed_birth_dates():
+    """Give the user0..userN fixtures a birth date. Fixtures only."""
+    with db._cursor() as cur:
+        cur.execute("SELECT id, email, birth_date FROM users ORDER BY id")
+        rows = [dict(r) for r in cur.fetchall()]
+    updated = 0
+    for row in rows:
+        if not SEED_EMAIL.match(row["email"] or "") or row["birth_date"]:
+            continue
+        index = int(re.search(r"\d+", row["email"]).group())
+        db.update_user(row["id"], {
+            "birth_date": _birth_date_for(index),
+            # Birth date decides who can match them, so mark the pool dirty the
+            # same way the API does.
+            "matching_profile_updated_at": db.now_iso(),
+        })
+        updated += 1
+    return updated
+
+
 def build_fake_users():
     users = []
     i = 0
@@ -103,6 +134,7 @@ def build_fake_users():
                 "answers": answers,
                 "important_ids": IMPORTANT_IDS_BY_ARCHETYPE[archetype],
                 "bio": f"[{archetype}] {BIOS[archetype]}",
+                "birth_date": _birth_date_for(i),
             })
             i += 1
     return users
@@ -119,15 +151,19 @@ if __name__ == "__main__":
             continue
         password_hash, salt = auth.hash_password("password123")
         user_id = db.create_user(u["email"], password_hash, salt, u["name"], u["gender"], {})
-        db.update_user(user_id, {"bio": u["bio"]})
+        db.update_user(user_id, {"bio": u["bio"], "birth_date": u["birth_date"]})
         draft = db.create_draft(user_id, version=1, answers=u["answers"], current_section=5)
         db.submit_response(draft["id"], u["important_ids"])
         created.append(user_id)
         print(f"创建 {u['name']} ({u['gender']}生) ({u['email']}) - {u['archetype']}")
 
-    maybe_regenerate_weekly_matches()
+    refreshed = backfill_seed_birth_dates()
+    if refreshed:
+        print(f"  ↻ 为 {refreshed} 个已存在的 fixture 补了出生日期")
 
-    print(f"\n已创建/复用 {len(created)} 个用户，密码均为 password123\n")
+    # Pairing is a separate, explicit step now: python run_pairing.py
+    print(f"\n已创建/复用 {len(created)} 个用户，密码均为 password123")
+    print("运行 `python run_pairing.py` 才会生成推荐\n")
     print("=== 本周匹配结果 ===")
     for user_id in created:
         user = db.get_user_by_id(user_id)

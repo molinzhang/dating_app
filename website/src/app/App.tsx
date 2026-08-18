@@ -1650,6 +1650,25 @@ function DashboardPage() {
         <StatusToggle status={user.status} onToggle={handleStatusToggle}/>
       </div>
 
+      {/* Registration requires a birth date, but accounts created before that
+          field existed have none — and they are silently excluded from everyone
+          who sets an age range, with nothing in the app ever telling them. */}
+      {!user.birthDate && (
+        <div className="mb-6 rounded-2xl border border-[#D97706]/40 bg-[#D97706]/10 p-5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={20} className="text-[#D97706] shrink-0 mt-0.5"/>
+            <div className="flex-1">
+              <h2 className="font-semibold mb-1">请补上出生日期</h2>
+              <p className="text-sm text-muted-foreground">
+                你的账号还没有出生日期。设置了「期待的年龄段」的人<strong>匹配不到你</strong>——
+                年龄未知会被他们的条件排除掉，你会因此少掉很多机会。
+              </p>
+              <Btn size="sm" className="mt-3" onClick={() => navigate("/settings")}>去补充 <ArrowRight size={15}/></Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Profile card */}
       <ProfileCard user={user} onUpdate={updateUser} onUploadPhoto={uploadPhoto}/>
 

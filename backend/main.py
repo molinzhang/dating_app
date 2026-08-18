@@ -471,6 +471,12 @@ def register(body: RegisterBody):
         raise HTTPException(status_code=400, detail="该邮箱已注册")
     if len(body.password) < 8:
         raise HTTPException(status_code=400, detail="密码至少需要8位")
+    # Required at registration: an account with no birth date is invisible to
+    # everyone who sets an age range, and there is no later moment that forces
+    # the question. Accounts created before this field existed keep working and
+    # are prompted in the app instead.
+    if not (body.birthDate or "").strip():
+        raise HTTPException(status_code=400, detail="请填写出生日期")
     password_hash, salt = auth.hash_password(body.password)
     display_name = body.email.split("@")[0]
     profile = normalize_matching_profile(body, body.gender)
