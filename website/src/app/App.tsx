@@ -118,7 +118,10 @@ type MatchState = { state: "pending" | "unmatched"; nextRefreshDate: string | nu
 interface WeeklyMatch {
   id: string;
   // Contact fields are omitted by the API once the match is skipped.
+  // Contact fields are only present once both sides said they were interested;
+  // the server omits them otherwise rather than relying on the UI to hide them.
   matchedUser: { displayName: string; email?: string; wechat?: string; instagram?: string; photoUrl?: string; };
+  contactsRevealed?: boolean;
   compatibilitySummary: string;
   dimensionComparisons: Array<{
     dimension: string; userScore: number; matchScore: number;
@@ -951,7 +954,7 @@ function LandingPage() {
             {[
               { n:1, icon:<BookOpen size={28}/>, title:"完成核心价值问卷", desc:"24道问题，约6–8分钟，探索你看待生活的方式。没有正确答案，只有真实的你。", color:"#E85D26" },
               { n:2, icon:<Star size={28}/>, title:"看见真实的个人价值画像", desc:"生成7个维度的价值画像，直观呈现你的倾向——不做判断，不比较高低。", color:"#2B5CE6" },
-              { n:3, icon:<Heart size={28}/>, title:"每周收到一位认真筛选的推荐", desc:"完成问卷并开启匹配后，每七天收到一位当前最匹配的人，附上联系方式。", color:"#7C3AED" },
+              { n:3, icon:<Heart size={28}/>, title:"每周收到一位认真筛选的推荐", desc:"完成问卷并开启匹配后，每七天收到一位当前最匹配的人。双方都表达兴趣后，才会交换联系方式。", color:"#7C3AED" },
             ].map(step => (
               <div key={step.n} className="bg-card rounded-2xl border border-border p-6 relative overflow-hidden">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center mb-4" style={{ background:step.color+"20", color:step.color }}>
@@ -1239,7 +1242,7 @@ function RegisterPage() {
             {showContacts && (
               <div className="mt-4 space-y-4">
                 <p className="text-xs text-muted-foreground p-3 bg-muted/50 rounded-xl leading-relaxed">
-                  联系方式仅会在匹配成功或系统推荐场景中按规则展示。
+                  只有在你和推荐对象<strong>都点了「我感兴趣」</strong>之后，才会互相显示联系方式。
                 </p>
                 <Input label="微信号" value={wechat} onChange={e => setWechat(e.target.value)} placeholder="你的微信号"/>
                 <Input label="Instagram" value={instagram} onChange={e => setInstagram(e.target.value)} placeholder="@username"/>
@@ -2643,13 +2646,26 @@ function MatchDetailPage() {
       </div>
 
       {/* Contact section */}
-      <div className="bg-card rounded-2xl border border-primary/20 p-6 mb-6">
+      <div className={cn("bg-card rounded-2xl border p-6 mb-6", m.contactsRevealed ? "border-primary/20" : "border-border")}>
         <div className="flex items-center gap-2 mb-3">
-          <BadgeCheck size={18} className="text-primary"/>
+          {m.contactsRevealed ? <BadgeCheck size={18} className="text-primary"/> : <Lock size={18} className="text-muted-foreground"/>}
           <h2 className="font-semibold">联系方式</h2>
         </div>
+        {!m.contactsRevealed ? (
+          <>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              当双方都感兴趣的时候，会显示联系方式。
+            </p>
+            <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+              {isInterested
+                ? `你已经表达了兴趣，正在等 ${m.matchedUser.displayName} 的回应。`
+                : `点下面的「我感兴趣」，如果 ${m.matchedUser.displayName} 也感兴趣，你们就会同时看到彼此的联系方式。`}
+            </p>
+          </>
+        ) : (
+        <>
         <p className="text-xs text-muted-foreground mb-4 leading-relaxed">
-          以下联系方式仅因为 {m.matchedUser.displayName} 是你当前的系统推荐而展示。请在尊重对方的前提下发起联系。
+          你们互相表达了兴趣，所以彼此的联系方式对对方开放。请在尊重对方的前提下发起联系。
         </p>
         <div className="space-y-3">
           <div className="flex items-center gap-3 p-3 bg-muted/50 rounded-xl">
@@ -2676,6 +2692,8 @@ function MatchDetailPage() {
             </div>
           )}
         </div>
+        </>
+        )}
       </div>
 
       {/* Mutual interest */}

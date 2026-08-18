@@ -200,6 +200,61 @@ describe("missing birth date", () => {
   });
 });
 
+describe("contact details", () => {
+  const MATCH = {
+    id: "1",
+    matchedUser: { displayName: "林晓雨", photoUrl: null },
+    contactsRevealed: false,
+    partnerSignal: "unseen" as const,
+    compatibilitySummary: "你们在3个核心维度上高度接近",
+    sharedInterests: [],
+    dimensionComparisons: [
+      { dimension: "探索开放 ↔ 稳定守序", userScore: 3, matchScore: 3.2, category: "close" as const },
+    ],
+    recommendationDate: "2026-08-18",
+    nextRefreshDate: "2026-08-23",
+    responseStatus: "viewed" as const,
+  };
+
+  const openMatch = async (over: Record<string, unknown> = {}) => {
+    me.mockImplementation(async () => ({ ...ME, weeklyMatch: { ...MATCH, ...over } }));
+    window.localStorage.setItem("cg_token", "test-token");
+    renderAt("/matches/current");
+    await screen.findByText("联系方式");
+  };
+
+  it("explains the rule instead of showing contacts", async () => {
+    await openMatch();
+    expect(screen.getByText("当双方都感兴趣的时候，会显示联系方式。")).toBeInTheDocument();
+    expect(screen.queryByText("邮箱")).not.toBeInTheDocument();
+    expect(screen.queryByText("微信")).not.toBeInTheDocument();
+  });
+
+  it("tells you it is waiting once you have said yes", async () => {
+    await openMatch({ responseStatus: "interested" });
+    expect(screen.getByText(/正在等 林晓雨 的回应/)).toBeInTheDocument();
+  });
+
+  it("shows contacts once both sides are interested", async () => {
+    await openMatch({
+      responseStatus: "interested",
+      partnerSignal: "interested",
+      contactsRevealed: true,
+      matchedUser: { displayName: "林晓雨", email: "lin@example.com", wechat: "wx_lin" },
+    });
+    expect(screen.getByText("lin@example.com")).toBeInTheDocument();
+    expect(screen.getByText("wx_lin")).toBeInTheDocument();
+    expect(screen.queryByText("当双方都感兴趣的时候，会显示联系方式。")).not.toBeInTheDocument();
+  });
+
+  it("does not leak contacts the server withheld", async () => {
+    // contactsRevealed false while the fields are absent is the real payload
+    // shape; the UI must not render an empty contact block either.
+    await openMatch({ responseStatus: "interested", partnerSignal: "interested" });
+    expect(screen.getByText("当双方都感兴趣的时候，会显示联系方式。")).toBeInTheDocument();
+  });
+});
+
 describe("protected routes", () => {
   it("sends a signed-out visitor to login instead of rendering blank", async () => {
     renderAt("/settings");

@@ -143,14 +143,25 @@ def serialize_weekly_match(match_row):
     matched_user = db.get_user_by_id(matched_id)
     photo = db.get_user_photo(matched_id)
     # A skipped match stays visible so the dashboard can say who was skipped,
-    # but the contact details go away — the user dismissed this person, and
-    # contacts are only meant to be exposed for an active recommendation.
+    # but nothing further about that person is surfaced.
     skipped = match_row["response_status"] == "skipped"
+    partner_signal = _partner_signal(match_row["user_id"], matched_id)
+    # Contacts are released only when BOTH sides said they were interested.
+    # Handing them over on the strength of one person's interest gives the other
+    # person's wechat away without their consent, which is the whole thing this
+    # gate exists to prevent. Computed server-side and the fields are omitted
+    # entirely, not just hidden in the UI — a client cannot reveal what it was
+    # never sent.
+    mutual_interest = (
+        not skipped
+        and match_row["response_status"] == "interested"
+        and partner_signal == "interested"
+    )
     matched = {
         "displayName": matched_user["display_name"],
         "photoUrl": _photo_url(matched_id, photo["updated_at"] if photo else None),
     }
-    if not skipped:
+    if mutual_interest:
         matched.update({
             "email": matched_user["email"],
             "wechat": matched_user.get("wechat"),
@@ -159,7 +170,8 @@ def serialize_weekly_match(match_row):
     return {
         "id": str(match_row["id"]),
         "matchedUser": matched,
-        "partnerSignal": _partner_signal(match_row["user_id"], matched_id),
+        "contactsRevealed": mutual_interest,
+        "partnerSignal": partner_signal,
         "compatibilitySummary": match_row["compatibility_summary"],
         # Words this user's stated expectations share with the match's bio.
         # Hidden once skipped, for the same reason the contacts are: the user
